@@ -16,20 +16,13 @@
 
 #endregion
 
-using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.IO;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Compression;
-using Grpc.Shared;
 using Microsoft.Extensions.Logging;
 
 #if NETSTANDARD2_0
@@ -116,7 +109,7 @@ namespace Grpc.Net.Client
                         buffer = ArrayPool<byte>.Shared.Rent(length);
                     }
 
-                    await ReadMessageContent(responseStream, buffer, length, cancellationToken).ConfigureAwait(false);
+                    await ReadMessageContentAsync(responseStream, buffer, length, cancellationToken).ConfigureAwait(false);
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -167,6 +160,16 @@ namespace Grpc.Net.Client
 
                 GrpcCallLog.ReceivedMessage(call.Logger);
                 return message;
+            }
+            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+            {
+                // When a deadline expires there can be a race between cancellation and Stream.ReadAsync.
+                // If ReadAsync is called after the response is disposed then ReadAsync throws ObjectDisposedException.
+                // https://github.com/dotnet/runtime/blob/dfbae37e91c4744822018dde10cbd414c661c0b8/src/libraries/System.Net.Http/src/System/Net/Http/SocketsHttpHandler/Http2Stream.cs#L1479-L1482
+                //
+                // If ObjectDisposedException is caught and cancellation has happened then rethrow as an OCE.
+                // This makes gRPC client correctly report a DeadlineExceeded status.
+                throw new OperationCanceledException();
             }
             catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
             {
@@ -223,7 +226,7 @@ namespace Grpc.Net.Client
             return (int)length;
         }
 
-        private static async Task ReadMessageContent(Stream responseStream, Memory<byte> messageData, int length, CancellationToken cancellationToken)
+        private static async Task ReadMessageContentAsync(Stream responseStream, Memory<byte> messageData, int length, CancellationToken cancellationToken)
         {
             // Read message content until content length is reached
             var received = 0;
@@ -244,7 +247,7 @@ namespace Grpc.Net.Client
             }
         }
 
-        private static bool TryDecompressMessage(ILogger logger, string compressionEncoding, Dictionary<string, ICompressionProvider> compressionProviders, byte[] messageData, int length, [NotNullWhen(true)]out ReadOnlySequence<byte>? result)
+        private static bool TryDecompressMessage(ILogger logger, string compressionEncoding, Dictionary<string, ICompressionProvider> compressionProviders, byte[] messageData, int length, [NotNullWhen(true)] out ReadOnlySequence<byte>? result)
         {
             if (compressionProviders.TryGetValue(compressionEncoding, out var compressionProvider))
             {
@@ -294,7 +297,7 @@ namespace Grpc.Net.Client
             try
             {
                 GrpcCallLog.SendingMessage(call.Logger);
-                
+
                 // Serialize message first. Need to know size to prefix the length in the header
                 serializer(message, serializationContext);
 

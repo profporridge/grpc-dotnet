@@ -16,13 +16,11 @@
 
 #endregion
 
-using System;
-
 namespace Grpc.AspNetCore.Server.Tests.TestObjects
 {
     public class TestData
     {
-        private ReadOnlyMemory<byte> _content;
+        private readonly ReadOnlyMemory<byte> _content;
         public ReadOnlySpan<byte> Span => _content.Span;
 
         public TestData(ReadOnlyMemory<byte> content)

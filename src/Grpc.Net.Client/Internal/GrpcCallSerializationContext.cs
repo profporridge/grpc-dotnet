@@ -16,14 +16,10 @@
 
 #endregion
 
-using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Diagnostics;
-using System.IO;
 using System.IO.Compression;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using Grpc.Core;
 using Grpc.Net.Compression;
 using Grpc.Shared;
@@ -123,7 +119,7 @@ namespace Grpc.Net.Client.Internal
                 {
                     return compressionProvider;
                 }
-                
+
                 throw new InvalidOperationException($"Could not find compression provider for '{_call.RequestGrpcEncoding}'.");
             }
 
@@ -282,7 +278,7 @@ namespace Grpc.Net.Client.Internal
 
             GrpcCallLog.CompressingMessage(_call.Logger, _compressionProvider.EncodingName);
 
-            var output = new MemoryStream();
+            var output = new NonDisposableMemoryStream();
 
             // Compression stream must be disposed before its content is read.
             // GZipStream writes final Adler32 at the end of the stream on dispose.

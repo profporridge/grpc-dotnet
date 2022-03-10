@@ -16,11 +16,6 @@
 
 #endregion
 
-using System;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
-
 namespace Grpc.Tests.Shared
 {
     public class TestHttpMessageHandler : HttpMessageHandler
@@ -34,7 +29,15 @@ namespace Grpc.Tests.Shared
 
         public static TestHttpMessageHandler Create(Func<HttpRequestMessage, Task<HttpResponseMessage>> sendAsync)
         {
-            return new TestHttpMessageHandler((request, cancellationToken) => sendAsync(request));
+            var tcs = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            return new TestHttpMessageHandler(async (request, cancellationToken) =>
+            {
+                using var registration = cancellationToken.Register(() => tcs.TrySetCanceled());
+
+                var result = await Task.WhenAny(sendAsync(request), tcs.Task);
+                return await result;
+            });
         }
 
         public static TestHttpMessageHandler Create(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> sendAsync)

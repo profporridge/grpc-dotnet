@@ -16,15 +16,7 @@
 
 #endregion
 
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.IO.Compression;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
@@ -32,7 +24,6 @@ using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Net.Compression;
 using Grpc.Shared;
 using Grpc.Tests.Shared;
-using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
 
 namespace Grpc.Net.Client.Tests
@@ -84,7 +75,7 @@ namespace Grpc.Net.Client.Tests
             var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
             Assert.AreEqual(StatusCode.Internal, ex.StatusCode);
             Assert.AreEqual("Error starting gRPC call. InvalidOperationException: Could not find compression provider for 'not-supported'.", ex.Status.Detail);
-            Assert.AreEqual("Could not find compression provider for 'not-supported'.", ex.Status.DebugException.Message);
+            Assert.AreEqual("Could not find compression provider for 'not-supported'.", ex.Status.DebugException!.Message);
         }
 
         [TestCase(true)]
@@ -146,7 +137,11 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual("Hello world", response.Message);
 
             CompatibilityHelpers.Assert(httpRequestMessage != null);
+#if NET6_0_OR_GREATER
+            Assert.AreEqual("identity,gzip,deflate,test", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
+#else
             Assert.AreEqual("identity,gzip,test", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
+#endif
             Assert.AreEqual("gzip", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageEncodingHeader).Single());
             Assert.AreEqual(false, httpRequestMessage.Headers.Contains(GrpcProtocolConstants.CompressionRequestAlgorithmHeader));
 
@@ -197,7 +192,7 @@ namespace Grpc.Net.Client.Tests
             });
 
             // Assert
-            var response = await call.ResponseAsync;
+            var response = await call.ResponseAsync.DefaultTimeout();
             Assert.IsNotNull(response);
             Assert.AreEqual("Hello world", response.Message);
         }
@@ -245,7 +240,11 @@ namespace Grpc.Net.Client.Tests
             // Assert
             var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
             Assert.AreEqual(StatusCode.Unimplemented, ex.StatusCode);
+#if NET6_0_OR_GREATER
+            Assert.AreEqual("Unsupported grpc-encoding value 'not-supported'. Supported encodings: identity, gzip, deflate", ex.Status.Detail);
+#else
             Assert.AreEqual("Unsupported grpc-encoding value 'not-supported'. Supported encodings: identity, gzip", ex.Status.Detail);
+#endif
         }
 
         [Test]
@@ -325,7 +324,11 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual("Hello world", response.Message);
 
             CompatibilityHelpers.Assert(httpRequestMessage != null);
+#if NET6_0_OR_GREATER
+            Assert.AreEqual("identity,gzip,deflate,test", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
+#else
             Assert.AreEqual("identity,gzip,test", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
+#endif
             Assert.AreEqual("gzip", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageEncodingHeader).Single());
             Assert.AreEqual(false, httpRequestMessage.Headers.Contains(GrpcProtocolConstants.CompressionRequestAlgorithmHeader));
 

@@ -16,8 +16,6 @@
 
 #endregion
 
-using System;
-using System.Net.Http;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Web;
@@ -53,6 +51,20 @@ namespace Grpc.AspNetCore.FunctionalTests.Web
 
         protected HttpClient CreateGrpcWebClient()
         {
+            var grpcWebHandler = CreateGrpcWebHandlerCore();
+
+            return Fixture.CreateClient(EndpointName, grpcWebHandler);
+        }
+
+        protected (HttpMessageHandler handler, Uri address) CreateGrpcWebHandler()
+        {
+            var grpcWebHandler = CreateGrpcWebHandlerCore();
+
+            return Fixture.CreateHandler(EndpointName, grpcWebHandler);
+        }
+
+        private GrpcWebHandler? CreateGrpcWebHandlerCore()
+        {
             Version protocol;
 
             if (EndpointName == TestServerEndpointName.Http1)
@@ -80,7 +92,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Web
                 };
             }
 
-            return Fixture.CreateClient(EndpointName, grpcWebHandler);
+            return grpcWebHandler;
         }
 
         protected GrpcChannel CreateGrpcWebChannel()

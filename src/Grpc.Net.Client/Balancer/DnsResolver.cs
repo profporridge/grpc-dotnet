@@ -37,21 +37,18 @@ namespace Grpc.Net.Client.Balancer
     /// Note: Experimental API that can change or be removed without any prior notice.
     /// </para>
     /// </summary>
-    internal sealed class DnsResolver : Resolver
+    internal sealed class DnsResolver : PollingResolver
     {
         // To prevent excessive re-resolution, we enforce a rate limit on DNS resolution requests.
         private static readonly TimeSpan MinimumDnsResolutionRate = TimeSpan.FromSeconds(15);
 
-        private readonly Uri _address;
+        private readonly Uri _originalAddress;
+        private readonly string _dnsAddress;
+        private readonly int _port;
         private readonly TimeSpan _refreshInterval;
-        private readonly ILogger<DnsResolver> _logger;
-        private readonly CancellationTokenSource _cts;
-        private readonly object _lock = new object();
+        private readonly ILogger _logger;
 
         private Timer? _timer;
-        private Action<ResolverResult>? _listener;
-        private bool _disposed;
-        private Task _refreshTask;
         private DateTime _lastResolveStart;
 
         // Internal for testing.
@@ -61,30 +58,26 @@ namespace Grpc.Net.Client.Balancer
         /// Initializes a new instance of the <see cref="DnsResolver"/> class with the specified target <see cref="Uri"/>.
         /// </summary>
         /// <param name="address">The target <see cref="Uri"/>.</param>
+        /// <param name="defaultPort">The default port.</param>
         /// <param name="loggerFactory">The logger factory.</param>
         /// <param name="refreshInterval">An interval for automatically refreshing the DNS hostname.</param>
-        public DnsResolver(Uri address, ILoggerFactory loggerFactory, TimeSpan refreshInterval)
+        public DnsResolver(Uri address, int defaultPort, ILoggerFactory loggerFactory, TimeSpan refreshInterval) : base(loggerFactory)
         {
-            _address = address;
+            _originalAddress = address;
+
+            // DNS address has the format: dns:[//authority/]host[:port]
+            // Because the host is specified in the path, the port needs to be parsed manually
+            var addressParsed = new Uri("temp://" + address.AbsolutePath.TrimStart('/'));
+            _dnsAddress = addressParsed.Host;
+            _port = addressParsed.Port == -1 ? defaultPort : addressParsed.Port;
             _refreshInterval = refreshInterval;
-            _cts = new CancellationTokenSource();
             _logger = loggerFactory.CreateLogger<DnsResolver>();
-            _refreshTask = Task.CompletedTask;
         }
 
         /// <inheritdoc />
-        public override void Start(Action<ResolverResult> listener)
+        protected override void OnStarted()
         {
-            if (_disposed)
-            {
-                throw new ObjectDisposedException(nameof(DnsResolver));
-            }
-            if (_listener != null)
-            {
-                throw new InvalidOperationException("Resolver has already been started.");
-            }
-
-            _listener = listener;
+            base.OnStarted();
 
             if (_refreshInterval != Timeout.InfiniteTimeSpan)
             {
@@ -94,32 +87,8 @@ namespace Grpc.Net.Client.Balancer
         }
 
         /// <inheritdoc />
-        public override Task RefreshAsync(CancellationToken cancellationToken)
+        protected override async Task ResolveAsync(CancellationToken cancellationToken)
         {
-            if (_disposed)
-            {
-                throw new ObjectDisposedException(nameof(DnsResolver));
-            }
-            if (_listener == null)
-            {
-                throw new InvalidOperationException("Resolver hasn't been started.");
-            }
-
-            lock (_lock)
-            {
-                if (_refreshTask.IsCompleted)
-                {
-                    _refreshTask = RefreshCoreAsync(cancellationToken);
-                }
-            }
-
-            return _refreshTask;
-        }
-
-        private async Task RefreshCoreAsync(CancellationToken cancellationToken)
-        {
-            CompatibilityHelpers.Assert(_listener != null);
-
             try
             {
                 var elapsedTimeSinceLastRefresh = SystemClock.UtcNow - _lastResolveStart;
@@ -133,29 +102,31 @@ namespace Grpc.Net.Client.Balancer
 
                 _lastResolveStart = SystemClock.UtcNow;
 
-                var dnsAddress = _address.AbsolutePath.TrimStart('/');
-
-                if (string.IsNullOrEmpty(dnsAddress))
+                if (string.IsNullOrEmpty(_dnsAddress))
                 {
-                    throw new InvalidOperationException($"Resolver address '{_address}' doesn't have a path.");
+                    throw new InvalidOperationException($"Resolver address '{_originalAddress}' is not valid. Please use dns:/// for DNS provider.");
                 }
 
-                DnsResolverLog.StartingDnsQuery(_logger, _address);
-                var addresses = await Dns.GetHostAddressesAsync(dnsAddress).ConfigureAwait(false);
+                DnsResolverLog.StartingDnsQuery(_logger, _dnsAddress);
+                var addresses =
+#if NET6_0_OR_GREATER                    
+                    await Dns.GetHostAddressesAsync(_dnsAddress, cancellationToken).ConfigureAwait(false);
+#else
+                    await Dns.GetHostAddressesAsync(_dnsAddress).ConfigureAwait(false);
+#endif
 
-                DnsResolverLog.ReceivedDnsResults(_logger, addresses.Length, _address, addresses);
+                DnsResolverLog.ReceivedDnsResults(_logger, addresses.Length, _dnsAddress, addresses);
 
-                var resolvedPort = _address.Port == -1 ? 80 : _address.Port;
-                var endpoints = addresses.Select(a => new DnsEndPoint(a.ToString(), resolvedPort)).ToArray();
-                var resolverResult = ResolverResult.ForResult(endpoints, serviceConfig: null);
-                _listener(resolverResult);
+                var endpoints = addresses.Select(a => new BalancerAddress(a.ToString(), _port)).ToArray();
+                var resolverResult = ResolverResult.ForResult(endpoints);
+                Listener(resolverResult);
             }
             catch (Exception ex)
             {
-                var message = $"Error getting DNS hosts for address '{_address}'.";
+                var message = $"Error getting DNS hosts for address '{_dnsAddress}'.";
 
-                DnsResolverLog.ErrorQueryingDns(_logger, _address, ex);
-                _listener(ResolverResult.ForFailure(GrpcProtocolHelpers.CreateStatusFromException(message, ex, StatusCode.Unavailable)));
+                DnsResolverLog.ErrorQueryingDns(_logger, _dnsAddress, ex);
+                Listener(ResolverResult.ForFailure(GrpcProtocolHelpers.CreateStatusFromException(message, ex, StatusCode.Unavailable)));
             }
         }
 
@@ -165,33 +136,13 @@ namespace Grpc.Net.Client.Balancer
             base.Dispose(disposing);
 
             _timer?.Dispose();
-            _cts.Cancel();
-            _listener = null;
-            _disposed = true;
         }
 
-        private async void OnTimerCallback(object? state)
+        private void OnTimerCallback(object? state)
         {
             try
             {
-                var awaitRefresh = false;
-                lock (_lock)
-                {
-                    if (_refreshTask.IsCompleted)
-                    {
-                        _refreshTask = RefreshCoreAsync(_cts.Token);
-                        awaitRefresh = true;
-                    }
-                }
-
-                if (awaitRefresh)
-                {
-                    await _refreshTask.ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Don't log cancellation.
+                Refresh();
             }
             catch (Exception ex)
             {
@@ -205,29 +156,29 @@ namespace Grpc.Net.Client.Balancer
         private static readonly Action<ILogger, TimeSpan, TimeSpan, Exception?> _startingRateLimitDelay =
             LoggerMessage.Define<TimeSpan, TimeSpan>(LogLevel.Debug, new EventId(1, "StartingRateLimitDelay"), "Starting rate limit delay of {DelayDuration}. DNS resolution rate limit is once every {RateLimitDuration}.");
 
-        private static readonly Action<ILogger, Uri, Exception?> _startingDnsQuery =
-            LoggerMessage.Define<Uri>(LogLevel.Trace, new EventId(1, "StartingDnsQuery"), "Starting DNS query to get hosts from '{DnsAddress}'.");
+        private static readonly Action<ILogger, string, Exception?> _startingDnsQuery =
+            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(2, "StartingDnsQuery"), "Starting DNS query to get hosts from '{DnsAddress}'.");
 
-        private static readonly Action<ILogger, int, Uri, string, Exception?> _receivedDnsResults =
-            LoggerMessage.Define<int, Uri, string>(LogLevel.Debug, new EventId(1, "ReceivedDnsResults"), "Received {ResultCount} DNS results from '{DnsAddress}'. Results: {DnsResults}");
+        private static readonly Action<ILogger, int, string, string, Exception?> _receivedDnsResults =
+            LoggerMessage.Define<int, string, string>(LogLevel.Debug, new EventId(3, "ReceivedDnsResults"), "Received {ResultCount} DNS results from '{DnsAddress}'. Results: {DnsResults}");
 
-        private static readonly Action<ILogger, Uri, Exception?> _errorQueryingDns =
-            LoggerMessage.Define<Uri>(LogLevel.Error, new EventId(1, "ErrorQueryingDns"), "Error querying DNS hosts for '{DnsAddress}'.");
+        private static readonly Action<ILogger, string, Exception?> _errorQueryingDns =
+            LoggerMessage.Define<string>(LogLevel.Error, new EventId(4, "ErrorQueryingDns"), "Error querying DNS hosts for '{DnsAddress}'.");
 
         private static readonly Action<ILogger, Exception?> _errorFromRefreshInterval =
-            LoggerMessage.Define(LogLevel.Error, new EventId(1, "ErrorFromRefreshIntervalTimer"), "Error from refresh interval timer.");
+            LoggerMessage.Define(LogLevel.Error, new EventId(5, "ErrorFromRefreshIntervalTimer"), "Error from refresh interval timer.");
 
         public static void StartingRateLimitDelay(ILogger logger, TimeSpan delayDuration, TimeSpan rateLimitDuration)
         {
             _startingRateLimitDelay(logger, delayDuration, rateLimitDuration, null);
         }
 
-        public static void StartingDnsQuery(ILogger logger, Uri dnsAddress)
+        public static void StartingDnsQuery(ILogger logger, string dnsAddress)
         {
             _startingDnsQuery(logger, dnsAddress, null);
         }
 
-        public static void ReceivedDnsResults(ILogger logger, int resultCount, Uri dnsAddress, IList<IPAddress> dnsResults)
+        public static void ReceivedDnsResults(ILogger logger, int resultCount, string dnsAddress, IList<IPAddress> dnsResults)
         {
             if (logger.IsEnabled(LogLevel.Debug))
             {
@@ -235,7 +186,7 @@ namespace Grpc.Net.Client.Balancer
             }
         }
 
-        public static void ErrorQueryingDns(ILogger logger, Uri dnsAddress, Exception ex)
+        public static void ErrorQueryingDns(ILogger logger, string dnsAddress, Exception ex)
         {
             _errorQueryingDns(logger, dnsAddress, ex);
         }
@@ -272,7 +223,7 @@ namespace Grpc.Net.Client.Balancer
         /// <inheritdoc />
         public override Resolver Create(ResolverOptions options)
         {
-            return new DnsResolver(options.Address, options.LoggerFactory, _refreshInterval);
+            return new DnsResolver(options.Address, options.DefaultPort, options.LoggerFactory, _refreshInterval);
         }
     }
 }

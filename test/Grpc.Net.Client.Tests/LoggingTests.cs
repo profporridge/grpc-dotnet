@@ -16,11 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Tests.Infrastructure;
@@ -61,19 +57,21 @@ namespace Grpc.Net.Client.Tests
             // Assert
             Assert.AreEqual("Hello world", rs.Message);
 
-            var logs = testSink.Writes.Where(w => w.LogLevel >= Microsoft.Extensions.Logging.LogLevel.Debug).ToList();
+            var log = testSink.Writes.Single(w => w.EventId.Name == "StartingCall");
+            Assert.AreEqual("Starting gRPC call. Method type: 'Unary', URI: 'https://localhost/ServiceName/MethodName'.", log.State.ToString());
+            AssertScope(log);
 
-            Assert.AreEqual("Starting gRPC call. Method type: 'Unary', URI: 'https://localhost/ServiceName/MethodName'.", logs[0].State.ToString());
-            AssertScope(logs[0]);
+            log = testSink.Writes.Single(w => w.EventId.Name == "SendingMessage");
+            Assert.AreEqual("Sending message.", log.State.ToString());
+            AssertScope(log);
 
-            Assert.AreEqual("Sending message.", logs[1].State.ToString());
-            AssertScope(logs[1]);
+            log = testSink.Writes.Single(w => w.EventId.Name == "ReadingMessage");
+            Assert.AreEqual("Reading message.", log.State.ToString());
+            AssertScope(log);
 
-            Assert.AreEqual("Reading message.", logs[2].State.ToString());
-            AssertScope(logs[2]);
-
-            Assert.AreEqual("Finished gRPC call.", logs[3].State.ToString());
-            AssertScope(logs[3]);
+            log = testSink.Writes.Single(w => w.EventId.Name == "FinishedCall");
+            Assert.AreEqual("Finished gRPC call.", log.State.ToString());
+            AssertScope(log);
 
             static void AssertScope(WriteContext log)
             {

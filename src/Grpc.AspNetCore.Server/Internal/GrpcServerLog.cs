@@ -16,7 +16,6 @@
 
 #endregion
 
-using System;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
 
@@ -42,8 +41,8 @@ namespace Grpc.AspNetCore.Server.Internal
         private static readonly Action<ILogger, string, Exception?> _errorExecutingServiceMethod =
             LoggerMessage.Define<string>(LogLevel.Error, new EventId(6, "ErrorExecutingServiceMethod"), "Error when executing service method '{ServiceMethod}'.");
 
-        private static readonly Action<ILogger, StatusCode, Exception?> _rpcConnectionError =
-            LoggerMessage.Define<StatusCode>(LogLevel.Information, new EventId(7, "RpcConnectionError"), "Error status code '{StatusCode}' raised.");
+        private static readonly Action<ILogger, StatusCode, string, Exception?> _rpcConnectionError =
+            LoggerMessage.Define<StatusCode, string>(LogLevel.Information, new EventId(7, "RpcConnectionError"), "Error status code '{StatusCode}' with detail '{Detail}' raised.");
 
         private static readonly Action<ILogger, string, Exception?> _encodingNotInAcceptEncoding =
             LoggerMessage.Define<string>(LogLevel.Debug, new EventId(8, "EncodingNotInAcceptEncoding"), "Request grpc-encoding header value '{GrpcEncoding}' is not in grpc-accept-encoding.");
@@ -130,9 +129,9 @@ namespace Grpc.AspNetCore.Server.Internal
             _errorExecutingServiceMethod(logger, serviceMethod, ex);
         }
 
-        public static void RpcConnectionError(ILogger logger, StatusCode statusCode, Exception ex)
+        public static void RpcConnectionError(ILogger logger, StatusCode statusCode, string detail, Exception? debugException)
         {
-            _rpcConnectionError(logger, statusCode, ex);
+            _rpcConnectionError(logger, statusCode, detail, debugException);
         }
 
         public static void EncodingNotInAcceptEncoding(ILogger logger, string grpcEncoding)

@@ -35,23 +35,19 @@ namespace Grpc.Net.Client.Balancer.Internal
     internal class PassiveSubchannelTransport : ISubchannelTransport, IDisposable
     {
         private readonly Subchannel _subchannel;
-        private DnsEndPoint? _currentEndPoint;
+        private BalancerAddress? _currentAddress;
 
         public PassiveSubchannelTransport(Subchannel subchannel)
         {
             _subchannel = subchannel;
         }
 
-        public DnsEndPoint? CurrentEndPoint => _currentEndPoint;
-
-        public void OnRequestComplete(CompletionContext context)
-        {
-        }
+        public BalancerAddress? CurrentAddress => _currentAddress;
 
         public void Disconnect()
         {
-            _currentEndPoint = null;
-            _subchannel.UpdateConnectivityState(ConnectivityState.Idle);
+            _currentAddress = null;
+            _subchannel.UpdateConnectivityState(ConnectivityState.Idle, "Disconnected.");
         }
 
         public
@@ -63,13 +59,13 @@ namespace Grpc.Net.Client.Balancer.Internal
             TryConnectAsync(CancellationToken cancellationToken)
         {
             Debug.Assert(_subchannel._addresses.Count == 1);
-            Debug.Assert(CurrentEndPoint == null);
+            Debug.Assert(CurrentAddress == null);
 
-            var currentEndPoint = _subchannel._addresses[0];
+            var currentAddress = _subchannel._addresses[0];
 
-            _subchannel.UpdateConnectivityState(ConnectivityState.Connecting);
-            _currentEndPoint = currentEndPoint;
-            _subchannel.UpdateConnectivityState(ConnectivityState.Ready);
+            _subchannel.UpdateConnectivityState(ConnectivityState.Connecting, "Passively connecting.");
+            _currentAddress = currentAddress;
+            _subchannel.UpdateConnectivityState(ConnectivityState.Ready, "Passively connected.");
 
 #if !NETSTANDARD2_0
             return new ValueTask<bool>(true);
@@ -80,11 +76,11 @@ namespace Grpc.Net.Client.Balancer.Internal
 
         public void Dispose()
         {
-            _currentEndPoint = null;
+            _currentAddress = null;
         }
 
 #if NET5_0_OR_GREATER
-        public ValueTask<Stream> GetStreamAsync(DnsEndPoint endPoint, CancellationToken cancellationToken)
+        public ValueTask<Stream> GetStreamAsync(BalancerAddress address, CancellationToken cancellationToken)
         {
             throw new NotSupportedException();
         }

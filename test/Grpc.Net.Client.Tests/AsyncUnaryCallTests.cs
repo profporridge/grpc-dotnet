@@ -16,21 +16,14 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Shared;
 using Grpc.Tests.Shared;
-using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
 
 namespace Grpc.Net.Client.Tests
@@ -73,17 +66,19 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual(new Uri("https://localhost/ServiceName/MethodName"), httpRequestMessage.RequestUri);
             Assert.AreEqual(new MediaTypeHeaderValue("application/grpc"), httpRequestMessage.Content?.Headers?.ContentType);
             Assert.AreEqual(GrpcProtocolConstants.TEHeaderValue, httpRequestMessage.Headers.TE.Single().Value);
+#if NET6_0_OR_GREATER
+            Assert.AreEqual("identity,gzip,deflate", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
+#else
             Assert.AreEqual("identity,gzip", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
+#endif
             Assert.AreEqual(null, requestContentLength);
 
-            var userAgent = httpRequestMessage.Headers.UserAgent.Single()!;
-            Assert.AreEqual("grpc-dotnet", userAgent.Product?.Name);
-            Assert.IsTrue(!string.IsNullOrEmpty(userAgent.Product?.Version));
+            var grpcVersion = httpRequestMessage.Headers.UserAgent.First();
+            Assert.AreEqual("grpc-dotnet", grpcVersion.Product?.Name);
+            Assert.IsTrue(!string.IsNullOrEmpty(grpcVersion.Product?.Version));
 
-            // Santity check that the user agent doesn't have the git hash in it and isn't too long.
-            // Sending a long user agent with each call has performance implications.
-            Assert.IsFalse(userAgent.Product!.Version!.Contains('+'));
-            Assert.IsTrue(userAgent.Product!.Version!.Length <= 10);
+            // Sanity check that the user agent doesn't have the git hash in it.
+            Assert.IsFalse(grpcVersion.Product!.Version!.Contains('+'));
         }
 
         [Test]
@@ -112,7 +107,8 @@ namespace Grpc.Net.Client.Tests
             var invoker = HttpClientCallInvokerFactory.Create(winHttpHandler, "https://localhost");
 
             // Act
-            var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "Hello world" });
+            var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(
+                ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "Hello world" }).ResponseAsync.DefaultTimeout();
 
             // Assert
             Assert.AreEqual("Hello world", rs.Message);
@@ -143,7 +139,8 @@ namespace Grpc.Net.Client.Tests
             var invoker = HttpClientCallInvokerFactory.Create(handler, "http://localhost");
 
             // Act
-            var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "World" });
+            var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(
+                ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "World" }).ResponseAsync.DefaultTimeout();
 
             // Assert
             Assert.AreEqual("Hello world", rs.Message);

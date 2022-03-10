@@ -25,6 +25,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client.Configuration;
+using Grpc.Net.Client.Internal;
+using Microsoft.Extensions.Logging;
 
 namespace Grpc.Net.Client.Balancer
 {
@@ -38,7 +40,7 @@ namespace Grpc.Net.Client.Balancer
     /// </para>
     /// <para>
     /// A <see cref="Resolver"/> doesn't need to automatically re-resolve on failure. Instead, the callback
-    /// is responsible for eventually invoking <see cref="RefreshAsync(CancellationToken)"/>.
+    /// is responsible for eventually invoking <see cref="Refresh()"/>.
     /// </para>
     /// <para>
     /// Note: Experimental API that can change or be removed without any prior notice.
@@ -57,15 +59,16 @@ namespace Grpc.Net.Client.Balancer
         public abstract void Start(Action<ResolverResult> listener);
 
         /// <summary>
-        /// Refresh resolution. Updated results are passed to the callback.
-        /// Can only be called after <see cref="Start(Action{ResolverResult})"/>.
+        /// Refresh resolution. Can only be called after <see cref="Start(Action{ResolverResult})"/>.
+        /// The default implementation is no-op.
         /// <para>
         /// This is only a hint. Implementation takes it as a signal but may not start resolution.
         /// </para>
         /// </summary>
-        /// <param name="cancellationToken">A cancellation token.</param>
-        /// <returns>A task.</returns>
-        public abstract Task RefreshAsync(CancellationToken cancellationToken);
+        public virtual void Refresh()
+        {
+            // no-op
+        }
 
         /// <summary>
         /// Releases the unmanaged resources used by the <see cref="LoadBalancer"/> and optionally releases
@@ -99,11 +102,12 @@ namespace Grpc.Net.Client.Balancer
         private BalancerAttributes? _attributes;
 
         [DebuggerStepThrough]
-        private ResolverResult(Status status, IReadOnlyList<DnsEndPoint>? addresses, ServiceConfig? serviceConfig)
+        private ResolverResult(Status status, IReadOnlyList<BalancerAddress>? addresses, ServiceConfig? serviceConfig, Status? serviceConfigStatus)
         {
             Status = status;
             Addresses = addresses;
             ServiceConfig = serviceConfig;
+            ServiceConfigStatus = serviceConfigStatus;
         }
 
         /// <summary>
@@ -114,12 +118,17 @@ namespace Grpc.Net.Client.Balancer
         /// <summary>
         /// Gets a collection of resolved addresses.
         /// </summary>
-        public IReadOnlyList<DnsEndPoint>? Addresses { get; }
+        public IReadOnlyList<BalancerAddress>? Addresses { get; }
 
         /// <summary>
         /// Gets an optional service config.
         /// </summary>
         public ServiceConfig? ServiceConfig { get; }
+
+        /// <summary>
+        /// Gets an optional service config status.
+        /// </summary>
+        public Status? ServiceConfigStatus { get; }
 
         /// <summary>
         /// Gets metadata attributes.
@@ -139,19 +148,36 @@ namespace Grpc.Net.Client.Balancer
                 throw new ArgumentException("Error status code must not be OK.", nameof(status));
             }
 
-            return new ResolverResult(status, addresses: null, serviceConfig: null);
+            return new ResolverResult(status, addresses: null, serviceConfig: null, serviceConfigStatus: null);
         }
 
         /// <summary>
         /// Create <see cref="ResolverResult"/> for the specified addresses.
         /// </summary>
         /// <param name="addresses">The resolved addresses.</param>
-        /// <param name="serviceConfig">An optional service config.</param>
         /// <returns>A resolver result.</returns>
         [DebuggerStepThrough]
-        public static ResolverResult ForResult(IReadOnlyList<DnsEndPoint> addresses, ServiceConfig? serviceConfig)
+        public static ResolverResult ForResult(IReadOnlyList<BalancerAddress> addresses)
         {
-            return new ResolverResult(Status.DefaultSuccess, addresses, serviceConfig);
+            return new ResolverResult(Status.DefaultSuccess, addresses, serviceConfig: null, serviceConfigStatus: null);
+        }
+
+        /// <summary>
+        /// Create <see cref="ResolverResult"/> for the specified addresses and service config.
+        /// </summary>
+        /// <param name="addresses">The resolved addresses.</param>
+        /// <param name="serviceConfig">An optional service config. A <c>null</c> value indicates that the resolver either didn't retreive a service config or an error occurred. The error must be specified using <paramref name="serviceConfigStatus"/>.</param>
+        /// <param name="serviceConfigStatus">A service config status. The status indicates an error retreiveing or parsing the config. The status must not be <see cref="StatusCode.OK"/> if no service config is specified.</param>
+        /// <returns>A resolver result.</returns>
+        [DebuggerStepThrough]
+        public static ResolverResult ForResult(IReadOnlyList<BalancerAddress> addresses, ServiceConfig? serviceConfig, Status? serviceConfigStatus)
+        {
+            if (serviceConfigStatus?.StatusCode == StatusCode.OK && serviceConfig == null)
+            {
+                throw new ArgumentException("Service config status code must not be OK when there is no service config.", nameof(serviceConfigStatus));
+            }
+
+            return new ResolverResult(Status.DefaultSuccess, addresses, serviceConfig, serviceConfigStatus);
         }
     }
 }

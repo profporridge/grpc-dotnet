@@ -16,11 +16,8 @@
 
 #endregion
 
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Logging;
 
 namespace FunctionalTestsWebsite.Services
 {
@@ -68,7 +65,7 @@ namespace FunctionalTestsWebsite.Services
 
         public override async Task SayHellosSendHeadersFirst(HelloRequest request, IServerStreamWriter<HelloReply> responseStream, ServerCallContext context)
         {
-            await context.WriteResponseHeadersAsync(null);
+            await context.WriteResponseHeadersAsync(Metadata.Empty);
 
             await SayHellosCore(request, responseStream);
         }

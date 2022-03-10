@@ -16,11 +16,8 @@
 
 #endregion
 
-using System;
-using System.Threading.Tasks;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
-using Microsoft.Extensions.Logging;
 using SingletonCount;
 
 namespace FunctionalTestsWebsite.Services
@@ -28,7 +25,7 @@ namespace FunctionalTestsWebsite.Services
     public class SingletonCounterService : Counter.CounterBase, IDisposable
     {
         private readonly ILogger _logger;
-        private int _count = 0;
+        private int _count;
 
         public SingletonCounterService(ILoggerFactory loggerFactory)
         {

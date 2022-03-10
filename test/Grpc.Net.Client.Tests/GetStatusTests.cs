@@ -16,10 +16,7 @@
 
 #endregion
 
-using System;
 using System.Net;
-using System.Net.Http;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
@@ -87,7 +84,7 @@ namespace Grpc.Net.Client.Tests
 
             var status = call.GetStatus();
             Assert.AreEqual(StatusCode.DataLoss, status.StatusCode);
-            Assert.AreEqual(null, status.Detail);
+            Assert.AreEqual(string.Empty, status.Detail);
         }
 
         [Test]

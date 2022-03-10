@@ -16,8 +16,6 @@
 
 #endregion
 
-using System.Linq;
-using System.Threading.Tasks;
 using Compression;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.AspNetCore.Server.Internal;
@@ -33,6 +31,9 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
     {
         [TestCase("identity")]
         [TestCase("gzip")]
+#if NET6_0_OR_GREATER
+        [TestCase("deflate")]
+#endif
         public async Task SendCompressedMessage_ServiceCompressionConfigured_ResponseGzipEncoding(string algorithmName)
         {
             // Arrange

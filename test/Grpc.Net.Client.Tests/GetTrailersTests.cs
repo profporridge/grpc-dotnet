@@ -16,17 +16,10 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
-using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Internal.Http;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Shared;
@@ -157,7 +150,7 @@ namespace Grpc.Net.Client.Tests
 
             // Assert
             Assert.AreEqual(StatusCode.Aborted, ex.StatusCode);
-            Assert.AreEqual(null, ex.Status.Detail);
+            Assert.AreEqual(string.Empty, ex.Status.Detail);
             Assert.AreEqual(0, ex.Trailers.Count);
 
             var log = testSink.Writes.Single(w => w.EventId.Name == "ErrorParsingTrailers");

@@ -16,12 +16,8 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.Sockets;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Shared;
 using Grpc.Shared.Server;
@@ -33,7 +29,8 @@ namespace Grpc.AspNetCore.Server.Internal
 {
     internal sealed partial class HttpContextServerCallContext : ServerCallContext, IServerCallContextFeature
     {
-        private static readonly AuthContext UnauthenticatedContext = new AuthContext(null, new Dictionary<string, List<AuthProperty>>());
+        // TODO(JamesNK): Remove nullable override after Grpc.Core.Api update
+        private static readonly AuthContext UnauthenticatedContext = new AuthContext(null!, new Dictionary<string, List<AuthProperty>>());
         private string? _peer;
         private Metadata? _requestHeaders;
         private Metadata? _responseTrailers;
@@ -76,33 +73,39 @@ namespace Grpc.AspNetCore.Server.Internal
 
         protected override string HostCore => HttpContext.Request.Host.Value;
 
-        protected override string? PeerCore
+        protected override string PeerCore
         {
             get
             {
                 // Follows the standard at https://github.com/grpc/grpc/blob/master/doc/naming.md
                 if (_peer == null)
                 {
-                    var connection = HttpContext.Connection;
-                    if (connection.RemoteIpAddress != null)
-                    {
-                        switch (connection.RemoteIpAddress.AddressFamily)
-                        {
-                            case AddressFamily.InterNetwork:
-                                _peer = "ipv4:" + connection.RemoteIpAddress + ":" + connection.RemotePort;
-                                break;
-                            case AddressFamily.InterNetworkV6:
-                                _peer = "ipv6:[" + connection.RemoteIpAddress + "]:" + connection.RemotePort;
-                                break;
-                            default:
-                                // TODO(JamesNK) - Test what should be output when used with UDS and named pipes
-                                _peer = "unknown:" + connection.RemoteIpAddress + ":" + connection.RemotePort;
-                                break;
-                        }
-                    }
+                    _peer = BuildPeer();
                 }
 
                 return _peer;
+            }
+        }
+
+        private string BuildPeer()
+        {
+            var connection = HttpContext.Connection;
+            if (connection.RemoteIpAddress != null)
+            {
+                switch (connection.RemoteIpAddress.AddressFamily)
+                {
+                    case AddressFamily.InterNetwork:
+                        return $"ipv4:{connection.RemoteIpAddress}:{connection.RemotePort}";
+                    case AddressFamily.InterNetworkV6:
+                        return $"ipv6:[{connection.RemoteIpAddress}]:{connection.RemotePort}";
+                    default:
+                        // TODO(JamesNK) - Test what should be output when used with UDS and named pipes
+                        return $"unknown:{connection.RemoteIpAddress}:{connection.RemotePort}";
+                }
+            }
+            else
+            {
+                return "unknown"; // Match Grpc.Core
             }
         }
 
@@ -175,7 +178,10 @@ namespace Grpc.AspNetCore.Server.Internal
         {
             if (ex is RpcException rpcException)
             {
-                GrpcServerLog.RpcConnectionError(Logger, rpcException.StatusCode, ex);
+                // RpcException is thrown by client code to modify the status returned from the server.
+                // Log the status, detail and debug exception (if present).
+                // Don't log the RpcException itself to reduce log verbosity. All of its information is already captured.
+                GrpcServerLog.RpcConnectionError(Logger, rpcException.StatusCode, rpcException.Status.Detail, rpcException.Status.DebugException);
 
                 // There are two sources of metadata entries on the server-side:
                 // 1. serverCallContext.ResponseTrailers
@@ -297,7 +303,10 @@ namespace Grpc.AspNetCore.Server.Internal
             GrpcEventSource.Log.CallStop();
         }
 
+        // TODO(JamesNK): Remove nullable override after Grpc.Core.Api update
+#pragma warning disable CS8764 // Nullability of return type doesn't match overridden member (possibly because of nullability attributes).
         protected override WriteOptions? WriteOptionsCore { get; set; }
+#pragma warning restore CS8764 // Nullability of return type doesn't match overridden member (possibly because of nullability attributes).
 
         protected override AuthContext AuthContextCore
         {
@@ -324,9 +333,7 @@ namespace Grpc.AspNetCore.Server.Internal
 
         protected override IDictionary<object, object> UserStateCore => HttpContext.Items!;
 
-        internal bool HasBufferedMessage { get; set; }
-
-        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions options)
+        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options)
         {
             // TODO(JunTaoLuo, JamesNK): Currently blocked on ContextPropagationToken implementation in Grpc.Core.Api
             // https://github.com/grpc/grpc-dotnet/issues/40
@@ -335,30 +342,32 @@ namespace Grpc.AspNetCore.Server.Internal
 
         protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders)
         {
+            if (responseHeaders == null)
+            {
+                throw new ArgumentNullException(nameof(responseHeaders));
+            }
+
             // Headers can only be written once. Throw on subsequent call to write response header instead of silent no-op.
             if (HttpContext.Response.HasStarted)
             {
                 throw new InvalidOperationException("Response headers can only be sent once per call.");
             }
 
-            if (responseHeaders != null)
+            foreach (var entry in responseHeaders)
             {
-                foreach (var entry in responseHeaders)
+                if (entry.Key == GrpcProtocolConstants.CompressionRequestAlgorithmHeader)
                 {
-                    if (entry.Key == GrpcProtocolConstants.CompressionRequestAlgorithmHeader)
-                    {
-                        // grpc-internal-encoding-request is used in the server to set message compression
-                        // on a per-call bassis.
-                        // 'grpc-encoding' is sent even if WriteOptions.Flags = NoCompress. In that situation
-                        // individual messages will not be written with compression.
-                        ResponseGrpcEncoding = entry.Value;
-                        HttpContext.Response.Headers[GrpcProtocolConstants.MessageEncodingHeader] = ResponseGrpcEncoding;
-                    }
-                    else
-                    {
-                        var encodedValue = entry.IsBinary ? Convert.ToBase64String(entry.ValueBytes) : entry.Value;
-                        HttpContext.Response.Headers.Append(entry.Key, encodedValue);
-                    }
+                    // grpc-internal-encoding-request is used in the server to set message compression
+                    // on a per-call bassis.
+                    // 'grpc-encoding' is sent even if WriteOptions.Flags = NoCompress. In that situation
+                    // individual messages will not be written with compression.
+                    ResponseGrpcEncoding = entry.Value;
+                    HttpContext.Response.Headers[GrpcProtocolConstants.MessageEncodingHeader] = ResponseGrpcEncoding;
+                }
+                else
+                {
+                    var encodedValue = entry.IsBinary ? Convert.ToBase64String(entry.ValueBytes) : entry.Value;
+                    HttpContext.Response.Headers.Append(entry.Key, encodedValue);
                 }
             }
 
@@ -402,6 +411,16 @@ namespace Grpc.AspNetCore.Server.Internal
 
         private Activity? GetHostActivity()
         {
+#if NET6_0_OR_GREATER
+            // Feature always returns the host activity
+            var feature = HttpContext.Features.Get<IHttpActivityFeature>();
+            if (feature != null)
+            {
+                return feature.Activity;
+            }
+#endif
+
+            // If feature isn't available, or not supported, then fallback to Activity.Current.
             var activity = Activity.Current;
             while (activity != null)
             {
@@ -461,26 +480,13 @@ namespace Grpc.AspNetCore.Server.Internal
                 await completionFeature.CompleteAsync();
             }
 
-#if NET6_0_OR_GREATER
-            // With HTTP/3 we don't want to abort the write side of the stream.
-            // That will create a race between the completed response and the abort
-            // reaching the client.
-            // Instead we just want to abort the read side of the stream.
-            // Kestrel will do this automatically if there is unread request content.
-            if (GrpcProtocolConstants.IsHttp3(HttpContext.Request.Protocol))
-            {
-                return;
-            }
-#endif
-
             // HttpResetFeature should always be set on context,
             // but in case it isn't, fall back to HttpContext.Abort.
-            // Abort will send error code INTERNAL_ERROR instead of NO_ERROR.
+            // Abort will send error code INTERNAL_ERROR.
             var resetFeature = HttpContext.Features.Get<IHttpResetFeature>();
             if (resetFeature != null)
             {
-                // HTTP/3 has different error codes
-                var errorCode = GrpcProtocolConstants.Http2ResetStreamNoError;
+                var errorCode = GrpcProtocolConstants.GetCancelErrorCode(HttpContext.Request.Protocol);
 
                 GrpcServerLog.ResettingResponse(Logger, errorCode);
                 resetFeature.Reset(errorCode);

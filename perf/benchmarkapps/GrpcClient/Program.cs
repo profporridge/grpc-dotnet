@@ -16,23 +16,16 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
+using System.Globalization;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -51,17 +44,17 @@ namespace GrpcClient
         private static List<List<double>> _latencyPerConnection = null!;
         private static int _callsStarted;
         private static double _maxLatency;
-        private static Stopwatch _workTimer = new Stopwatch();
+        private static readonly Stopwatch _workTimer = new Stopwatch();
         private static volatile bool _warmingUp;
         private static volatile bool _stopped;
-        private static SemaphoreSlim _lock = new SemaphoreSlim(1);
+        private static readonly SemaphoreSlim _lock = new SemaphoreSlim(1);
         private static List<(double sum, int count)> _latencyAverage = null!;
         private static int _totalRequests;
         private static ClientOptions _options = null!;
         private static ILoggerFactory? _loggerFactory;
         private static SslCredentials? _credentials;
-        private static StringBuilder _errorStringBuilder = new StringBuilder();
-        private static CancellationTokenSource _cts = new CancellationTokenSource();
+        private static readonly StringBuilder _errorStringBuilder = new StringBuilder();
+        private static readonly CancellationTokenSource _cts = new CancellationTokenSource();
 
         public static async Task<int> Main(string[] args)
         {
@@ -178,7 +171,7 @@ namespace GrpcClient
                 var text = "Exception from test: " + ex.Message;
                 Log(text);
                 _errorStringBuilder.AppendLine();
-                _errorStringBuilder.Append($"[{DateTime.Now:hh:mm:ss.fff}] {text}");
+                _errorStringBuilder.Append(CultureInfo.InvariantCulture, $"[{DateTime.Now:hh:mm:ss.fff}] {text}");
             }
         }
 
@@ -471,7 +464,7 @@ namespace GrpcClient
 
         private static void Log(string message)
         {
-            var time = DateTime.Now.ToString("hh:mm:ss.fff");
+            var time = DateTime.Now.ToString("hh:mm:ss.fff", CultureInfo.InvariantCulture);
             Console.WriteLine($"[{time}] {message}");
         }
 

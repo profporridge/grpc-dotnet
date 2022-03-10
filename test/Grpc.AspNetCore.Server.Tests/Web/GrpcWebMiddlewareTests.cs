@@ -16,9 +16,6 @@
 
 #endregion
 
-using System;
-using System.Linq;
-using System.Threading.Tasks;
 using Grpc.AspNetCore.Server.Tests.Infrastructure;
 using Grpc.AspNetCore.Web;
 using Grpc.AspNetCore.Web.Internal;
@@ -69,10 +66,54 @@ namespace Grpc.AspNetCore.Server.Tests.Web
             httpContext.Request.ContentType = contentType;
 
             // Act
-            var grpcWebMode = GrpcWebMiddleware.GetGrpcWebMode(httpContext);
+            var grpcWebContext = GrpcWebMiddleware.GetGrpcWebContext(httpContext);
 
             // Assert
-            Assert.AreEqual(Enum.Parse<ServerGrpcWebMode>(expectedGrpcWebMode), grpcWebMode);
+            Assert.AreEqual(Enum.Parse<ServerGrpcWebMode>(expectedGrpcWebMode), grpcWebContext.Request);
+        }
+
+        [TestCase(GrpcWebProtocolConstants.GrpcWebContentType, null,
+            nameof(ServerGrpcWebMode.GrpcWeb), nameof(ServerGrpcWebMode.GrpcWeb))]
+        [TestCase(GrpcWebProtocolConstants.GrpcWebContentType, GrpcWebProtocolConstants.GrpcWebTextContentType,
+            nameof(ServerGrpcWebMode.GrpcWeb), nameof(ServerGrpcWebMode.GrpcWebText))]
+        [TestCase(GrpcWebProtocolConstants.GrpcWebTextContentType, GrpcWebProtocolConstants.GrpcWebTextContentType,
+            nameof(ServerGrpcWebMode.GrpcWebText), nameof(ServerGrpcWebMode.GrpcWebText))]
+        [TestCase("application/json", null,
+            nameof(ServerGrpcWebMode.None), nameof(ServerGrpcWebMode.None))]
+        [TestCase("", null,
+            nameof(ServerGrpcWebMode.None), nameof(ServerGrpcWebMode.None))]
+        public void GetGrpcWebMode_Accept_Matched(
+            string? contentType, string? accept,
+            string expectedRequestGrpcWebMode, string expectedResponseGrpcWebMode)
+        {
+            // Arrange
+            var httpContext = new DefaultHttpContext();
+            httpContext.Request.Method = HttpMethods.Post;
+            httpContext.Request.ContentType = contentType!;
+            httpContext.Request.Headers["Accept"] = accept;
+
+            // Act
+            var grpcWebContext = GrpcWebMiddleware.GetGrpcWebContext(httpContext);
+
+            // Assert
+            Assert.AreEqual(Enum.Parse<ServerGrpcWebMode>(expectedRequestGrpcWebMode), grpcWebContext.Request);
+            Assert.AreEqual(Enum.Parse<ServerGrpcWebMode>(expectedResponseGrpcWebMode), grpcWebContext.Response);
+        }
+
+        [Test]
+        public void GetGrpcWebMode_NonPost_NotMatched()
+        {
+            // Arrange
+            var httpContext = new DefaultHttpContext();
+            httpContext.Request.Method = HttpMethods.Options;
+            httpContext.Request.ContentType = GrpcWebProtocolConstants.GrpcWebContentType;
+
+            // Act
+            var grpcWebContext = GrpcWebMiddleware.GetGrpcWebContext(httpContext);
+
+            // Assert
+            Assert.AreEqual(ServerGrpcWebMode.None, grpcWebContext.Request);
+            Assert.AreEqual(ServerGrpcWebMode.None, grpcWebContext.Response);
         }
 
         [Test]

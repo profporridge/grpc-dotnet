@@ -16,13 +16,9 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
 using BenchmarkWorkerWebsite;
 using Grpc.Core;
 using Grpc.Core.Utils;
-using Microsoft.Extensions.Logging;
 
 namespace Grpc.Testing
 {
@@ -35,7 +31,7 @@ namespace Grpc.Testing
         {
             this.logger = loggerFactory.CreateLogger<WorkerServiceImpl>();
         }
-        
+
         public override async Task RunServer(IAsyncStreamReader<ServerArgs> requestStream, IServerStreamWriter<ServerStatus> responseStream, ServerCallContext context)
         {
             GrpcPreconditions.CheckState(await requestStream.MoveNext());
@@ -48,7 +44,7 @@ namespace Grpc.Testing
                 Port = runner.BoundPort,
                 Cores = Environment.ProcessorCount,
             });
-                
+
             while (await requestStream.MoveNext())
             {
                 var reset = requestStream.Current.Mark.Reset;

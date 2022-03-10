@@ -16,16 +16,12 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Linq;
+using System.Globalization;
 using System.Net;
 using System.Text;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
-using Grpc.Core.Utils;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Tests.Shared;
 using NUnit.Framework;
@@ -148,6 +144,115 @@ namespace Grpc.Net.Client.Tests
             Assert.IsNotNull(call.GetTrailers());
         }
 
+        [TestCase(StatusCode.OK)]
+        [TestCase(StatusCode.Internal)]
+        public async Task Intercept_OnCompleted_StatusReturned(StatusCode statusCode)
+        {
+            await StatusReturnedCore(new OnCompletedInterceptor(), statusCode);
+        }
+
+        [TestCase(StatusCode.OK)]
+        [TestCase(StatusCode.Internal)]
+        public async Task Intercept_Await_StatusReturned(StatusCode statusCode)
+        {
+            await StatusReturnedCore(new AwaitInterceptor(), statusCode);
+        }
+
+        private static async Task StatusReturnedCore(StatusInterceptor interceptor, StatusCode statusCode)
+        {
+            // Arrange
+            var httpClient = ClientTestHelpers.CreateTestClient(async request =>
+            {
+                if (statusCode == StatusCode.OK)
+                {
+                    var streamContent = await ClientTestHelpers.CreateResponseContent(new HelloReply { Message = "PASS" }).DefaultTimeout();
+                    return ResponseUtils.CreateResponse(HttpStatusCode.OK, streamContent);
+                }
+                else
+                {
+                    return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, statusCode);
+                }
+            });
+
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient);
+
+            // Act
+            var callInvoker = invoker.Intercept(interceptor);
+
+            var call = callInvoker.AsyncUnaryCall(ClientTestHelpers.ServiceMethod, Host, new CallOptions(), new HelloRequest());
+
+            // Assert
+            if (statusCode == StatusCode.OK)
+            {
+                var result = await call.ResponseAsync.DefaultTimeout();
+                Assert.AreEqual("PASS", result.Message);
+            }
+            else
+            {
+                var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
+                Assert.AreEqual(statusCode, ex.StatusCode);
+            }
+
+            var interceptorStatusCode = await interceptor.GetStatusCodeAsync().DefaultTimeout();
+            Assert.AreEqual(statusCode, interceptorStatusCode);
+        }
+
+        private abstract class StatusInterceptor : Interceptor
+        {
+            protected readonly TaskCompletionSource<StatusCode> StatusTcs = new TaskCompletionSource<StatusCode>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public Task<StatusCode> GetStatusCodeAsync() => StatusTcs.Task;
+        }
+
+        private class OnCompletedInterceptor : StatusInterceptor
+        {
+            public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(TRequest request, ClientInterceptorContext<TRequest, TResponse> context, AsyncUnaryCallContinuation<TRequest, TResponse> continuation)
+            {
+                var result = continuation(request, context);
+                result.GetAwaiter().OnCompleted(() =>
+                {
+                    try
+                    {
+                        StatusTcs.SetResult(result.GetStatus().StatusCode);
+                    }
+                    catch (Exception ex)
+                    {
+                        StatusTcs.SetException(ex);
+                    }
+                });
+                return result;
+            }
+        }
+
+        private class AwaitInterceptor : StatusInterceptor
+        {
+            public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(TRequest request, ClientInterceptorContext<TRequest, TResponse> context, AsyncUnaryCallContinuation<TRequest, TResponse> continuation)
+            {
+                var call = continuation(request, context);
+
+                return new AsyncUnaryCall<TResponse>(HandleResponse(call), call.ResponseHeadersAsync, call.GetStatus, call.GetTrailers, call.Dispose);
+
+                async Task<TResponse> HandleResponse(AsyncUnaryCall<TResponse> call)
+                {
+                    try
+                    {
+                        return await call.ResponseAsync;
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            StatusTcs.SetResult(call.GetStatus().StatusCode);
+                        }
+                        catch (Exception ex)
+                        {
+                            StatusTcs.SetException(ex);
+                        }
+                    }
+                }
+            }
+        }
+
         private class ClientStreamingCountingInterceptor : Interceptor
         {
             public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(ClientInterceptorContext<TRequest, TResponse> context, AsyncClientStreamingCallContinuation<TRequest, TResponse> continuation)
@@ -157,7 +262,8 @@ namespace Grpc.Net.Client.Tests
                 var requestStream = new WrappedClientStreamWriter<TRequest>(response.RequestStream,
                     message => { counter++; return message; }, null);
                 var responseAsync = response.ResponseAsync.ContinueWith(
-                    unaryResponse => (TResponse)(object)counter.ToString()  // Cast to object first is needed to satisfy the type-checker
+                    unaryResponse => (TResponse)(object)counter.ToString(CultureInfo.InvariantCulture),  // Cast to object first is needed to satisfy the type-checker,
+                    TaskScheduler.Default
                 );
                 return new AsyncClientStreamingCall<TRequest, TResponse>(requestStream, responseAsync, response.ResponseHeadersAsync, response.GetStatus, response.GetTrailers, response.Dispose);
             }
@@ -178,7 +284,7 @@ namespace Grpc.Net.Client.Tests
             {
                 if (onResponseStreamEnd != null)
                 {
-                    return writer.CompleteAsync().ContinueWith(x => onResponseStreamEnd());
+                    return writer.CompleteAsync().ContinueWith(x => onResponseStreamEnd(), TaskScheduler.Default);
                 }
                 return writer.CompleteAsync();
             }

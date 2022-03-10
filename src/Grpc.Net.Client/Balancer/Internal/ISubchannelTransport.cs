@@ -32,11 +32,10 @@ namespace Grpc.Net.Client.Balancer.Internal
     /// </summary>
     internal interface ISubchannelTransport : IDisposable
     {
-        void OnRequestComplete(CompletionContext context);
-        DnsEndPoint? CurrentEndPoint { get; }
+        BalancerAddress? CurrentAddress { get; }
 
 #if NET5_0_OR_GREATER
-        ValueTask<Stream> GetStreamAsync(DnsEndPoint endPoint, CancellationToken cancellationToken);
+        ValueTask<Stream> GetStreamAsync(BalancerAddress address, CancellationToken cancellationToken);
 #endif
 
 #if !NETSTANDARD2_0

@@ -18,6 +18,7 @@
 
 #if SUPPORT_LOAD_BALANCING
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Threading;
@@ -30,18 +31,21 @@ namespace Grpc.Net.Client.Balancer.Internal
     {
         internal const string WaitForReadyKey = "WaitForReady";
         internal const string SubchannelKey = "Subchannel";
+        internal const string CurrentAddressKey = "CurrentAddress";
 
         private readonly ConnectionManager _manager;
 
-        public BalancerHttpHandler(HttpMessageHandler innerHandler, ConnectionManager manager)
+        public BalancerHttpHandler(HttpMessageHandler innerHandler, HttpHandlerType httpHandlerType, ConnectionManager manager)
             : base(innerHandler)
         {
             _manager = manager;
 
 #if NET5_0_OR_GREATER
-            var socketsHttpHandler = (SocketsHttpHandler?)HttpHandlerFactory.GetHttpHandlerType(innerHandler, "System.Net.Http.SocketsHttpHandler");
-            if (socketsHttpHandler != null)
+            if (httpHandlerType == HttpHandlerType.SocketsHttpHandler)
             {
+                var socketsHttpHandler = HttpRequestHelpers.GetHttpHandlerType<SocketsHttpHandler>(innerHandler);
+                CompatibilityHelpers.Assert(socketsHttpHandler != null, "Should have handler with this handler type.");
+
                 socketsHttpHandler.ConnectCallback = OnConnect;
             }
 #endif
@@ -52,10 +56,15 @@ namespace Grpc.Net.Client.Balancer.Internal
         {
             if (!context.InitialRequestMessage.TryGetOption<Subchannel>(SubchannelKey, out var subchannel))
             {
-                throw new InvalidOperationException();
+                throw new InvalidOperationException($"Unable to get subchannel from {nameof(HttpRequestMessage)}.");
+            }
+            if (!context.InitialRequestMessage.TryGetOption<BalancerAddress>(CurrentAddressKey, out var currentAddress))
+            {
+                throw new InvalidOperationException($"Unable to get current address from {nameof(HttpRequestMessage)}.");
             }
 
-            return await subchannel.Transport.GetStreamAsync(context.DnsEndPoint, cancellationToken).ConfigureAwait(false);
+            Debug.Assert(context.DnsEndPoint.Equals(currentAddress.EndPoint), "Context endpoint should equal address endpoint.");
+            return await subchannel.Transport.GetStreamAsync(currentAddress, cancellationToken).ConfigureAwait(false);
         }
 #endif
 
@@ -76,16 +85,17 @@ namespace Grpc.Net.Client.Balancer.Internal
             await _manager.ConnectAsync(waitForReady: false, cancellationToken).ConfigureAwait(false);
             var pickContext = new PickContext { Request = request };
             var result = await _manager.PickAsync(pickContext, waitForReady, cancellationToken).ConfigureAwait(false);
-            var address = result.Address!;
+            var address = result.Address;
+            var addressEndpoint = address.EndPoint;
 
             // Update request host if required.
             if (!request.RequestUri.IsAbsoluteUri ||
-                request.RequestUri.Host != address.Host ||
-                request.RequestUri.Port != address.Port)
+                request.RequestUri.Host != addressEndpoint.Host ||
+                request.RequestUri.Port != addressEndpoint.Port)
             {
                 var uriBuilder = new UriBuilder(request.RequestUri);
-                uriBuilder.Host = address.Host;
-                uriBuilder.Port = address.Port;
+                uriBuilder.Host = addressEndpoint.Host;
+                uriBuilder.Port = addressEndpoint.Port;
                 request.RequestUri = uriBuilder.Uri;
             }
 
@@ -93,16 +103,20 @@ namespace Grpc.Net.Client.Balancer.Internal
             // Set sub-connection onto request.
             // Will be used to get a stream in SocketsHttpHandler.ConnectCallback.
             request.SetOption(SubchannelKey, result.Subchannel);
+            request.SetOption(CurrentAddressKey, address);
 #endif
+
+            var responseMessageTask = base.SendAsync(request, cancellationToken);
+            result.SubchannelCallTracker?.Start();
 
             try
             {
-                var responseMessage = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-                
+                var responseMessage = await responseMessageTask.ConfigureAwait(false);
+
                 // TODO(JamesNK): This doesn't take into account long running streams.
                 // If there is response content then we need to wait until it is read to the end
                 // or the request is disposed.
-                result.OnComplete(new CompletionContext
+                result.SubchannelCallTracker?.Complete(new CompletionContext
                 {
                     Address = address
                 });
@@ -111,7 +125,7 @@ namespace Grpc.Net.Client.Balancer.Internal
             }
             catch (Exception ex)
             {
-                result.OnComplete(new CompletionContext
+                result.SubchannelCallTracker?.Complete(new CompletionContext
                 {
                     Address = address,
                     Error = ex

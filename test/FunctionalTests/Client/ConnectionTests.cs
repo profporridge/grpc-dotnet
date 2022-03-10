@@ -16,15 +16,14 @@
 
 #endregion
 
-using System;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Net;
+using System.Net.Sockets;
 using Greet;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Tests.Shared;
+using Microsoft.AspNetCore.Connections.Features;
 using NUnit.Framework;
 
 namespace Grpc.AspNetCore.FunctionalTests.Client
@@ -57,14 +56,49 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             // Assert
             Assert.AreEqual(StatusCode.Internal, ex.StatusCode);
 #if NET5_0_OR_GREATER
-            var debugException = ex.Status.DebugException;
+            var debugException = ex.Status.DebugException!;
             Assert.AreEqual("The SSL connection could not be established, see inner exception.", debugException.Message);
 #else
             Assert.AreEqual("Request protocol 'HTTP/1.1' is not supported.", ex.Status.Detail);
 #endif
         }
 
-#if NET6_0
+#if NET5_0_OR_GREATER
+        [Test]
+        public async Task UnixDomainSockets()
+        {
+            Task<HelloReply> UnaryUds(HelloRequest request, ServerCallContext context)
+            {
+#if NET6_0_OR_GREATER
+                var endPoint = (UnixDomainSocketEndPoint)context.GetHttpContext().Features.Get<IConnectionSocketFeature>()!.Socket.LocalEndPoint!;
+                Assert.NotNull(endPoint);
+#endif
+
+                return Task.FromResult(new HelloReply { Message = "Hello " + request.Name });
+            }
+
+            // Arrange
+            var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(UnaryUds);
+
+            var http = Fixture.CreateHandler(TestServerEndpointName.UnixDomainSocket);
+
+            var channel = GrpcChannel.ForAddress(http.address, new GrpcChannelOptions
+            {
+                LoggerFactory = LoggerFactory,
+                HttpHandler = http.handler
+            });
+
+            var client = TestClientFactory.Create(channel, method);
+
+            // Act
+            var response = await client.UnaryCall(new HelloRequest { Name = "John" }).ResponseAsync.DefaultTimeout();
+
+            // Assert
+            Assert.AreEqual("Hello John", response.Message);
+        }
+#endif
+
+#if NET6_0_OR_GREATER
         [Test]
         [RequireHttp3]
         public async Task Http3()
@@ -83,6 +117,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             // Act
             var response = await client.SayHelloAsync(new HelloRequest { Name = "John" }).ResponseAsync.DefaultTimeout();
 
+            // Assert
             Assert.AreEqual("Hello John", response.Message);
         }
 #endif

@@ -122,10 +122,13 @@ dotnet run --EnableOpenTelemetry=true
 
 The tester shows how to test gRPC services. The unit tests create and test a gRPC service directly. The functional tests show how to use [Microsoft.AspNetCore.TestHost](https://www.nuget.org/packages/Microsoft.AspNetCore.TestHost/) (version 3.1.2 or greater required) to host a gRPC service with an in-memory test server and call it using a gRPC client. The functional tests write client and server logs to the test output.
 
+The tests also show how to mock a gRPC client when testing gRPC client apps.
+
 ##### Scenarios:
 
 * Unit testing
 * Functional testing
+* Mocking gRPC client
 
 ## [Progressor](./Progressor)
 
@@ -268,3 +271,21 @@ The retrier example shows how to configure a client to use gRPC retries to retry
 ##### Scenarios:
 
 * Configure [gRPC retries](https://docs.microsoft.com/aspnet/core/grpc/retries)
+
+## [Container](./Container)
+
+The container example shows how to create a gRPC Kubernetes app. There are two containers in the example: a Blazor Server frontend, and a gRPC server backend with multiple replicas. The frontend uses gRPC client-side load balancing to call backend instances.
+
+##### Scenarios:
+
+* [Kubernetes](https://kubernetes.io/)
+* Configure [gRPC client-side load balancing](https://docs.microsoft.com/aspnet/core/grpc/loadbalancing)
+
+## [Uploader](./Uploader)
+
+The uploader shows how to upload a file in chunks using a client streaming gRPC method.
+
+##### Scenarios:
+
+* Client streaming call
+* Binary payload

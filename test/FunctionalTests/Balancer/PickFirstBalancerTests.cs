@@ -17,12 +17,13 @@
 #endregion
 
 #if SUPPORT_LOAD_BALANCING
-#if NET5_0_OR_GREATER
-
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using FunctionalTestsWebsite;
 using Google.Protobuf;
@@ -103,6 +104,63 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
         }
 
         [Test]
+        public async Task UnaryCall_SingleAddressFailure_RpcError()
+        {
+            // Ignore errors
+            SetExpectedErrorsFilter(writeContext =>
+            {
+                return true;
+            });
+
+            string? host = null;
+            Task<HelloReply> UnaryMethod(HelloRequest request, ServerCallContext context)
+            {
+                host = context.Host;
+                return Task.FromResult(new HelloReply { Message = request.Name });
+            }
+
+            // Arrange
+            using var endpoint = BalancerHelpers.CreateGrpcEndpoint<HelloRequest, HelloReply>(50051, UnaryMethod, nameof(UnaryMethod));
+
+            var channel = await BalancerHelpers.CreateChannel(LoggerFactory, new PickFirstConfig(), new[] { endpoint.Address }).DefaultTimeout();
+
+            var client = TestClientFactory.Create(channel, endpoint.Method);
+
+            // Act
+            var reply = await client.UnaryCall(new HelloRequest { Name = "Balancer" }).ResponseAsync.DefaultTimeout();
+
+            // Assert
+            Assert.AreEqual("Balancer", reply.Message);
+            Assert.AreEqual("127.0.0.1:50051", host);
+
+            Logger.LogInformation("Ending " + endpoint.Address);
+            endpoint.Dispose();
+
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(
+                () => client.UnaryCall(new HelloRequest { Name = "Balancer" }).ResponseAsync).DefaultTimeout();
+
+            Assert.AreEqual(StatusCode.Unavailable, ex.StatusCode);
+
+            // Sometimes SocketException is wrapped by HttpRequestException.
+            Assert.IsTrue(HasExceptionInStack<SocketException>(ex.Status.DebugException), $"Unexpected exception: {ex.Status.DebugException}");
+
+            static bool HasExceptionInStack<T>(Exception? ex)
+            {
+                while (ex != null)
+                {
+                    if (ex is T)
+                    {
+                        return true;
+                    }
+
+                    ex = ex.InnerException;
+                }
+
+                return false;
+            }
+        }
+
+        [Test]
         public async Task UnaryCall_UnavailableAddress_FallbackToWorkingAddress()
         {
             // Ignore errors
@@ -135,6 +193,22 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
 
             Logger.LogInformation("Ending " + endpoint1.Address);
             endpoint1.Dispose();
+
+            await BalancerHelpers.WaitForSubchannelsToBeReadyAsync(Logger, channel, expectedCount: 1,
+                getPickerSubchannels: picker=>
+                {
+                    // We want a subchannel that has no current address
+                    if (picker is PickFirstPicker pickFirstPicker)
+                    {
+                        var currentAddress = pickFirstPicker.Subchannel.CurrentAddress;
+                        Logger.LogInformation($"Got {nameof(PickFirstPicker)} with subchannel current address: {currentAddress?.ToString() ?? "null"}");
+                        if (currentAddress == null)
+                        {
+                            return new[] { pickFirstPicker.Subchannel };
+                        }
+                    }
+                    return Array.Empty<Subchannel>();
+                }).DefaultTimeout();
 
             reply = await client.UnaryCall(new HelloRequest { Name = "Balancer" }).ResponseAsync.DefaultTimeout();
             Assert.AreEqual("Balancer", reply.Message);
@@ -242,12 +316,12 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             var balancer = BalancerHelpers.GetInnerLoadBalancer<PickFirstBalancer>(channel)!;
             var subchannel = balancer._subchannel!;
             var transport = (SocketConnectivitySubchannelTransport)subchannel.Transport;
-            var activeStreams = transport._activeStreams;
+            var activeStreams = transport.GetActiveStreams();
 
             // Assert
             Assert.AreEqual(2, activeStreams.Count);
-            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), activeStreams[0].EndPoint);
-            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), activeStreams[1].EndPoint);
+            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), activeStreams[0].Address.EndPoint);
+            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), activeStreams[1].Address.EndPoint);
 
             tcs.SetResult(null);
 
@@ -257,14 +331,20 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             Logger.LogInformation($"Remove endpoint");
             endpoint1.Dispose();
 
-            await TestHelpers.AssertIsTrueRetryAsync(() => activeStreams.Count == 0, "Active streams removed.").DefaultTimeout();
+            await TestHelpers.AssertIsTrueRetryAsync(() =>
+            {
+                activeStreams = transport.GetActiveStreams();
+                Logger.LogInformation($"Current active stream addresses: {string.Join(", ", activeStreams.Select(s => s.Address))}");
+                return activeStreams.Count == 0;
+            }, "Active streams removed.", Logger).DefaultTimeout();
 
             var reply = await client.UnaryCall(new HelloRequest { Name = "Balancer" }).ResponseAsync.DefaultTimeout();
             Assert.AreEqual("Balancer", reply.Message);
             Assert.AreEqual("127.0.0.1:50052", host);
 
+            activeStreams = transport.GetActiveStreams();
             Assert.AreEqual(1, activeStreams.Count);
-            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50052), activeStreams[0].EndPoint);
+            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50052), activeStreams[0].Address.EndPoint);
         }
 
         [Test]
@@ -357,6 +437,4 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
         }
     }
 }
-
-#endif
 #endif

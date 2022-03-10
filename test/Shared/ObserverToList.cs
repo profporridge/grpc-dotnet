@@ -16,8 +16,6 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 
 namespace Grpc.Tests.Shared
 {
@@ -57,9 +55,9 @@ namespace Grpc.Tests.Shared
             }
         }
 
-        private List<T> _output;
-        private Predicate<T>? _filter;
-        private string? _name;  // for debugging 
+        private readonly List<T> _output;
+        private readonly Predicate<T>? _filter;
+        private readonly string? _name;  // for debugging 
         #endregion
     }
 }

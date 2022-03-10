@@ -16,9 +16,6 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -112,7 +109,7 @@ namespace Grpc.AspNetCore.FunctionalTests
 
         protected void AssertHasLogRpcConnectionError(StatusCode statusCode, string detail)
         {
-            AssertHasLog(LogLevel.Information, "RpcConnectionError", $"Error status code '{statusCode}' raised.", e => GetRpcExceptionDetail(e) == detail);
+            AssertHasLog(LogLevel.Information, "RpcConnectionError", $"Error status code '{statusCode}' with detail '{detail}' raised.");
         }
 
         protected void AssertHasLog(LogLevel logLevel, string name, string message, Func<Exception, bool>? exceptionMatch = null)
@@ -136,6 +133,11 @@ namespace Grpc.AspNetCore.FunctionalTests
                 }
                 return match;
             });
+        }
+
+        protected bool HasLogException(Func<Exception, bool> exceptionMatch)
+        {
+            return Logs.Any(x => x.Exception != null && exceptionMatch(x.Exception));
         }
 
         protected void SetExpectedErrorsFilter(Func<LogRecord, bool> expectedErrorsFilter)

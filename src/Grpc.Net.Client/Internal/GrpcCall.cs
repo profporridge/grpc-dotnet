@@ -16,20 +16,11 @@
 
 #endregion
 
-using System;
-using System.Buffers;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
-using System.IO;
-using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client.Internal.Http;
-using Grpc.Net.Client.Configuration;
 using Grpc.Shared;
 using Microsoft.Extensions.Logging;
 #if SUPPORT_LOAD_BALANCING
@@ -49,14 +40,15 @@ namespace Grpc.Net.Client.Internal
         internal const string ErrorStartingCallMessage = "Error starting gRPC call.";
 
         private readonly CancellationTokenSource _callCts;
+        private readonly TaskCompletionSource<HttpResponseMessage> _httpResponseTcs;
         private readonly TaskCompletionSource<Status> _callTcs;
-        private readonly DateTime _deadline;
         private readonly GrpcMethodInfo _grpcMethodInfo;
         private readonly int _attemptCount;
 
-        internal Task<HttpResponseMessage>? _httpResponseTask;
+        internal Task<HttpResponseMessage> HttpResponseTask => _httpResponseTcs.Task;
         private Task<Metadata>? _responseHeadersTask;
         private Timer? _deadlineTimer;
+        private DateTime _deadline;
         private CancellationTokenRegistration? _ctsRegistration;
 
         public bool Disposed { get; private set; }
@@ -76,6 +68,7 @@ namespace Grpc.Net.Client.Internal
             ValidateDeadline(options.Deadline);
 
             _callCts = new CancellationTokenSource();
+            _httpResponseTcs = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             // Run the callTcs continuation immediately to keep the same context. Required for Activity.
             _callTcs = new TaskCompletionSource<Status>();
             Method = method;
@@ -223,7 +216,18 @@ namespace Grpc.Net.Client.Internal
             Channel.FinishActiveCall(this);
 
             _ctsRegistration?.Dispose();
-            _deadlineTimer?.Dispose();
+
+            if (_deadlineTimer != null)
+            {
+                lock (this)
+                {
+                    // Timer callback can call Timer.Change so dispose deadline timer in a lock
+                    // and set to null to indicate to the callback that it has been disposed.
+                    _deadlineTimer?.Dispose();
+                    _deadlineTimer = null;
+                }
+            }
+
             HttpResponse?.Dispose();
             ClientStreamReader?.Dispose();
             ClientStreamWriter?.Dispose();
@@ -247,7 +251,7 @@ namespace Grpc.Net.Client.Internal
             var status = (CallTask.IsCompletedSuccessfully()) ? CallTask.Result : new Status(StatusCode.Cancelled, string.Empty);
             return CreateRpcException(status);
         }
-        
+
         private void FinishResponseAndCleanUp(Status status)
         {
             ResponseFinished = true;
@@ -289,11 +293,9 @@ namespace Grpc.Net.Client.Internal
 
         private async Task<Metadata> GetResponseHeadersCoreAsync()
         {
-            CompatibilityHelpers.Assert(_httpResponseTask != null);
-
             try
             {
-                var httpResponse = await _httpResponseTask.ConfigureAwait(false);
+                var httpResponse = await HttpResponseTask.ConfigureAwait(false);
 
                 // Check if the headers have a status. If they do then wait for the overall call task
                 // to complete before returning headers. This means that if the call failed with a
@@ -305,7 +307,7 @@ namespace Grpc.Net.Client.Internal
                 }
 
                 var metadata = GrpcProtocolHelpers.BuildMetadata(httpResponse.Headers);
-                
+
                 // https://github.com/grpc/proposal/blob/master/A6-client-retries.md#exposed-retry-metadata
                 if (_attemptCount > 1)
                 {
@@ -386,6 +388,9 @@ namespace Grpc.Net.Client.Internal
                 // Cancellation will also cause reader/writer to throw if used afterwards.
                 _callCts.Cancel();
 
+                // Ensure any logic that is waiting on the HttpResponse is unstuck.
+                _httpResponseTcs.TrySetCanceled();
+
                 // Cancellation token won't send RST_STREAM if HttpClient.SendAsync is complete.
                 // Dispose HttpResponseMessage to send RST_STREAM to server for in-progress calls.
                 HttpResponse?.Dispose();
@@ -399,7 +404,7 @@ namespace Grpc.Net.Client.Internal
 
         internal IDisposable? StartScope()
         {
-            // Only return a scope if the logger is enabled to log 
+            // Only return a scope if the logger is enabled to log
             // in at least Critical level for performance
             if (Logger.IsEnabled(LogLevel.Critical))
             {
@@ -415,11 +420,6 @@ namespace Grpc.Net.Client.Internal
             {
                 var (diagnosticSourceEnabled, activity) = InitializeCall(request, timeout);
 
-                if (Options.Credentials != null || Channel.CallCredentials?.Count > 0)
-                {
-                    await ReadCredentials(request).ConfigureAwait(false);
-                }
-
                 // Unset variable to check that FinishCall is called in every code path
                 bool finished;
 
@@ -427,6 +427,13 @@ namespace Grpc.Net.Client.Internal
 
                 try
                 {
+                    // User supplied call credentials could error and so must be run
+                    // inside try/catch to handle errors.
+                    if (Options.Credentials != null || Channel.CallCredentials?.Count > 0)
+                    {
+                        await ReadCredentials(request).ConfigureAwait(false);
+                    }
+
                     // Fail early if deadline has already been exceeded
                     _callCts.Token.ThrowIfCancellationRequested();
 
@@ -434,19 +441,16 @@ namespace Grpc.Net.Client.Internal
                     {
                         // If a HttpClient has been specified then we need to call it with ResponseHeadersRead
                         // so that the response message is available for streaming
-                        _httpResponseTask = (Channel.HttpInvoker is HttpClient httpClient)
+                        var httpResponseTask = (Channel.HttpInvoker is HttpClient httpClient)
                             ? httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _callCts.Token)
                             : Channel.HttpInvoker.SendAsync(request, _callCts.Token);
 
-                        HttpResponse = await _httpResponseTask.ConfigureAwait(false);
+                        HttpResponse = await httpResponseTask.ConfigureAwait(false);
+                        _httpResponseTcs.TrySetResult(HttpResponse);
                     }
                     catch (Exception ex)
                     {
-                        // Don't log OperationCanceledException if deadline has exceeded
-                        // or the call has been canceled.
-                        if (ex is OperationCanceledException &&
-                            _callTcs.Task.IsCompletedSuccessfully() &&
-                            (_callTcs.Task.Result.StatusCode == StatusCode.DeadlineExceeded || _callTcs.Task.Result.StatusCode == StatusCode.Cancelled))
+                        if (IsCancellationOrDeadlineException(ex))
                         {
                             throw;
                         }
@@ -576,15 +580,45 @@ namespace Grpc.Net.Client.Internal
                     ResolveException(ErrorStartingCallMessage, ex, out status, out var resolvedException);
 
                     finished = FinishCall(request, diagnosticSourceEnabled, activity, status.Value);
-                    _responseTcs?.TrySetException(resolvedException);
+
+                    // Update HTTP response TCS before clean up. Needs to happen first because cleanup will
+                    // cancel the TCS for anyone still listening.
+                    _httpResponseTcs.TrySetException(resolvedException);
 
                     Cleanup(status.Value);
+
+                    // Update response TCS after overall call status is resolved. This is required so that
+                    // the call is completed before an error is thrown from ResponseAsync. If it happens
+                    // afterwards then there is a chance GetStatus() will error because the call isn't complete.
+                    _responseTcs?.TrySetException(resolvedException);
                 }
 
                 // Verify that FinishCall is called in every code path of this method.
                 // Should create an "Unassigned variable" compiler error if not set.
                 Debug.Assert(finished);
             }
+        }
+
+        private bool IsCancellationOrDeadlineException(Exception ex)
+        {
+            // Don't log OperationCanceledException if deadline has exceeded
+            // or the call has been canceled.
+            if (ex is OperationCanceledException &&
+                _callTcs.Task.IsCompletedSuccessfully() &&
+                (_callTcs.Task.Result.StatusCode == StatusCode.DeadlineExceeded || _callTcs.Task.Result.StatusCode == StatusCode.Cancelled))
+            {
+                return true;
+            }
+
+            // Exception may specify RST_STREAM or abort code that resolves to cancellation.
+            // If protocol error is cancellation and deadline has been exceeded then that
+            // means the server canceled and the local deadline timer hasn't triggered.
+            if (GrpcProtocolHelpers.ResolveRpcExceptionStatusCode(ex) == StatusCode.Cancelled)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -605,7 +639,7 @@ namespace Grpc.Net.Client.Internal
             else if (ex is RpcException rpcException)
             {
                 status = rpcException.Status;
-                
+
                 // If trailers have been set, and the RpcException isn't using them, then
                 // create new RpcException with trailers. Want to try and avoid this as
                 // the exact stack location will be lost.
@@ -620,8 +654,24 @@ namespace Grpc.Net.Client.Internal
             }
             else
             {
-                status = GrpcProtocolHelpers.CreateStatusFromException(summary, ex);
-                resolvedException = CreateRpcException(status.Value);
+                var s = GrpcProtocolHelpers.CreateStatusFromException(summary, ex);
+
+                // The server could exceed the deadline and return a CANCELLED status before the
+                // client's deadline timer is triggered. When CANCELLED is received check the
+                // deadline against the clock and change status to DEADLINE_EXCEEDED if required.
+                if (s.StatusCode == StatusCode.Cancelled)
+                {
+                    lock (this)
+                    {
+                        if (IsDeadlineExceededUnsynchronized())
+                        {
+                            s = new Status(StatusCode.DeadlineExceeded, s.Detail, s.DebugException);
+                        }
+                    }
+                }
+
+                status = s;
+                resolvedException = CreateRpcException(s);
                 return true;
             }
 
@@ -703,7 +753,7 @@ namespace Grpc.Net.Client.Internal
 
                 if (diagnosticSourceEnabled)
                 {
-                    GrpcDiagnostics.DiagnosticListener.Write(GrpcDiagnostics.ActivityStartKey, new { Request = request });
+                    WriteDiagnosticEvent(GrpcDiagnostics.DiagnosticListener, GrpcDiagnostics.ActivityStartKey, new ActivityStartData(request));
                 }
             }
 
@@ -718,12 +768,33 @@ namespace Grpc.Net.Client.Internal
             return (diagnosticSourceEnabled, activity);
         }
 
-        private bool FinishCall(HttpRequestMessage request, bool diagnosticSourceEnabled, Activity? activity, Status? status)
+        private bool FinishCall(HttpRequestMessage request, bool diagnosticSourceEnabled, Activity? activity, Status status)
         {
-            if (status!.Value.StatusCode != StatusCode.OK)
+            if (status.StatusCode != StatusCode.OK)
             {
-                GrpcCallLog.GrpcStatusError(Logger, status.Value.StatusCode, status.Value.Detail);
-                GrpcEventSource.Log.CallFailed(status.Value.StatusCode);
+                if (status.StatusCode == StatusCode.DeadlineExceeded)
+                {
+                    // Usually a deadline will be triggered via the deadline timer. However,
+                    // if the client and server are on the same machine it is possible for the
+                    // client to get the response before the timer triggers. In that situation
+                    // treat a returned DEADLINE_EXCEEDED status as the client exceeding deadline.
+                    // To ensure that the deadline counter isn't incremented twice in a race
+                    // between the timer and status, lock and use _deadline to check whether
+                    // the client has processed that it has exceeded or not.
+                    lock (this)
+                    {
+                        if (IsDeadlineExceededUnsynchronized())
+                        {
+                            GrpcCallLog.DeadlineExceeded(Logger);
+                            GrpcEventSource.Log.CallDeadlineExceeded();
+
+                            _deadline = DateTime.MaxValue;
+                        }
+                    }
+                }
+
+                GrpcCallLog.GrpcStatusError(Logger, status.StatusCode, status.Detail);
+                GrpcEventSource.Log.CallFailed(status.StatusCode);
             }
             GrpcCallLog.FinishedCall(Logger);
             GrpcEventSource.Log.CallStop();
@@ -731,7 +802,7 @@ namespace Grpc.Net.Client.Internal
             // Activity needs to be stopped in the same execution context it was started
             if (activity != null)
             {
-                var statusText = status.Value.StatusCode.ToString("D");
+                var statusText = status.StatusCode.ToString("D");
                 if (statusText != null)
                 {
                     activity.AddTag(GrpcDiagnostics.GrpcStatusCodeTagName, statusText);
@@ -740,13 +811,13 @@ namespace Grpc.Net.Client.Internal
                 if (diagnosticSourceEnabled)
                 {
                     // Stop sets the end time if it was unset, but we want it set before we issue the write
-                    // so we do it now.   
+                    // so we do it now.
                     if (activity.Duration == TimeSpan.Zero)
                     {
                         activity.SetEndTime(DateTime.UtcNow);
                     }
 
-                    GrpcDiagnostics.DiagnosticListener.Write(GrpcDiagnostics.ActivityStopKey, new { Request = request, Response = HttpResponse });
+                    WriteDiagnosticEvent(GrpcDiagnostics.DiagnosticListener, GrpcDiagnostics.ActivityStopKey, new ActivityStopData(HttpResponse, request));
                 }
 
                 activity.Stop();
@@ -755,12 +826,18 @@ namespace Grpc.Net.Client.Internal
             return true;
         }
 
+        private bool IsDeadlineExceededUnsynchronized()
+        {
+            Debug.Assert(Monitor.IsEntered(this), "Check deadline in a lock. Updating a DateTime isn't guaranteed to be atomic. Avoid struct tearing.");
+            return _deadline <= Channel.Clock.UtcNow;
+        }
+
         private async Task ReadCredentials(HttpRequestMessage request)
         {
             // In C-Core the call credential auth metadata is only applied if the channel is secure
             // The equivalent in grpc-dotnet is only applying metadata if HttpClient is using TLS
             // HttpClient scheme will be HTTP if it is using H2C (HTTP2 without TLS)
-            if (Channel.Address.Scheme == Uri.UriSchemeHttps)
+            if (Channel.IsSecure)
             {
                 var configurator = new DefaultCallCredentialsConfigurator();
 
@@ -880,19 +957,32 @@ namespace Grpc.Net.Client.Internal
             // the response has not been finished or canceled
             if (!_callCts.IsCancellationRequested && !ResponseFinished)
             {
-                var remaining = _deadline - Channel.Clock.UtcNow;
-                if (remaining <= TimeSpan.Zero)
+                TimeSpan remaining;
+                lock (this)
                 {
-                    DeadlineExceeded();
-                }
-                else
-                {
-                    // Deadline has not been reached because timer maximum due time was smaller than deadline.
-                    // Reschedule DeadlineExceeded again until deadline has been exceeded.
-                    GrpcCallLog.DeadlineTimerRescheduled(Logger, remaining);
+                    // If _deadline is MaxValue then the DEADLINE_EXCEEDED status has
+                    // already been received by the client and the timer can stop.
+                    if (_deadline == DateTime.MaxValue)
+                    {
+                        return;
+                    }
 
-                    var dueTime = CommonGrpcProtocolHelpers.GetTimerDueTime(remaining, Channel.MaxTimerDueTime);
-                    _deadlineTimer!.Change(dueTime, Timeout.Infinite);
+                    remaining = _deadline - Channel.Clock.UtcNow;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        DeadlineExceeded();
+                        return;
+                    }
+
+                    if (_deadlineTimer != null)
+                    {
+                        // Deadline has not been reached because timer maximum due time was smaller than deadline.
+                        // Reschedule DeadlineExceeded again until deadline has been exceeded.
+                        GrpcCallLog.DeadlineTimerRescheduled(Logger, remaining);
+
+                        var dueTime = CommonGrpcProtocolHelpers.GetTimerDueTime(remaining, Channel.MaxTimerDueTime);
+                        _deadlineTimer.Change(dueTime, Timeout.Infinite);
+                    }
                 }
             }
         }
@@ -951,6 +1041,22 @@ namespace Grpc.Net.Client.Internal
         public Task WriteClientStreamAsync<TState>(Func<GrpcCall<TRequest, TResponse>, Stream, CallOptions, TState, ValueTask> writeFunc, TState state)
         {
             return ClientStreamWriter!.WriteAsync(writeFunc, state);
+        }
+
+#if NET5_0_OR_GREATER
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2026:UnrecognizedReflectionPattern",
+            Justification = "The values being passed into Write have the commonly used properties being preserved with DynamicDependency.")]
+#endif
+        private static void WriteDiagnosticEvent<
+#if NET5_0_OR_GREATER
+            [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)]
+#endif
+            TValue>(
+            DiagnosticSource diagnosticSource,
+            string name,
+            TValue value)
+        {
+            diagnosticSource.Write(name, value);
         }
     }
 }

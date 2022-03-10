@@ -16,13 +16,10 @@
 
 #endregion
 
-using System;
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.CommandLine.Rendering;
 using System.CommandLine.Rendering.Views;
-using System.IO;
-using System.Linq;
 using Grpc.Dotnet.Cli.Internal;
 using Grpc.Dotnet.Cli.Options;
 using Grpc.Dotnet.Cli.Properties;
@@ -73,7 +70,7 @@ namespace Grpc.Dotnet.Cli.Commands
                 return;
             }
 
-            var table = new TableView<ProjectItem> { Items = protobufElements};
+            var table = new TableView<ProjectItem> { Items = protobufElements };
 
             // Required columns (always displayed)
             table.AddColumn(r => r.UnevaluatedInclude, CoreStrings.TableColumnProtobufReference);

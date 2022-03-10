@@ -16,19 +16,12 @@
 
 #endregion
 
-using System;
-using System.Net;
-using System.Net.Http;
-using System.Security.Cryptography.X509Certificates;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
-using Grpc.Net.Client;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.ClientFactory;
 using Grpc.Tests.Shared;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using NUnit.Framework;
 
@@ -132,7 +125,9 @@ namespace Grpc.AspNetCore.Server.ClientFactory.Tests
             services
                 .AddGrpcClient<Greeter.GreeterClient>(options =>
                 {
+#pragma warning disable CS0618 // Type or member is obsolete
                     options.Interceptors.Add(new CallbackInterceptor(o => { }));
+#pragma warning restore CS0618 // Type or member is obsolete
                 })
                 .ConfigurePrimaryHttpMessageHandler(() => ClientTestHelpers.CreateTestMessageHandler(new HelloReply()));
 
@@ -145,7 +140,9 @@ namespace Grpc.AspNetCore.Server.ClientFactory.Tests
 
                 // Assert
                 Assert.AreEqual("http://contoso", options.Address!.OriginalString);
+#pragma warning disable CS0618 // Type or member is obsolete
                 Assert.AreEqual(1, options.Interceptors.Count);
+#pragma warning restore CS0618 // Type or member is obsolete
             }
         }
 

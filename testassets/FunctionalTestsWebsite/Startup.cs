@@ -16,19 +16,15 @@
 
 #endregion
 
-using System;
+using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
-using System.Net.Http;
 using System.Security.Claims;
-using System.Threading.Tasks;
 using FunctionalTestsWebsite.Infrastructure;
 using FunctionalTestsWebsite.Services;
 using Greet;
 using Grpc.AspNetCore.Server.Model;
+using Grpc.Tests.Shared;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 
@@ -124,6 +120,47 @@ namespace FunctionalTestsWebsite
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app)
         {
+            var logger = app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(Startup));
+            app.Use(async (context, next) =>
+            {
+                // Allow a call to specify a deadline, without enabling deadline timer on server.
+                if (context.Request.Headers.TryGetValue("remove-deadline", out var value) &&
+                    bool.TryParse(value.ToString(), out var remove) && remove)
+                {
+                    logger.LogInformation("Removing grpc-timeout header.");
+                    context.Request.Headers.Remove("grpc-timeout");
+                }
+
+                await next();
+            });
+
+            app.Use(async (context, next) =>
+            {
+                // Allow a call to specify activity tags are returned as trailers.
+                if (context.Request.Headers.TryGetValue("return-tags-trailers", out var value) &&
+                    bool.TryParse(value.ToString(), out var remove) && remove)
+                {
+                    logger.LogInformation("Replacing activity.");
+
+                    // Replace the activity to check that tags are added to the host activity.
+                    using (new ActivityReplacer("GrpcFunctionalTests"))
+                    {
+                        await next();
+                    }
+
+                    logger.LogInformation("Adding tags to trailers.");
+
+                    foreach (var tag in Activity.Current!.Tags)
+                    {
+                        context.Response.AppendTrailer(tag.Key, tag.Value);
+                    }
+                }
+                else
+                {
+                    await next();
+                }
+            });
+
             app.UseRouting();
 
             app.UseAuthorization();

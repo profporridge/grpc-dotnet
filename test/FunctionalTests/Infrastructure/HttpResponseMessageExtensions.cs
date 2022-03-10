@@ -16,13 +16,9 @@
 
 #endregion
 
-using System;
-using System.IO.Pipelines;
-using System.Linq;
+using System.Globalization;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Threading.Tasks;
 using Google.Protobuf;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.Core;
@@ -71,7 +67,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
             // Get message from the same collection as the status
             var messageString = GetStatusValue(statusHeadersCollection, GrpcProtocolConstants.MessageTrailer);
 
-            Assert.AreEqual(statusCode.ToTrailerString(), statusString, $"Expected grpc-status {statusCode} but got {(StatusCode)Convert.ToInt32(statusString)}. Message: {messageString}");
+            Assert.AreEqual(statusCode.ToTrailerString(), statusString, $"Expected grpc-status {statusCode} but got {(StatusCode)Convert.ToInt32(statusString, CultureInfo.InvariantCulture)}. Message: {messageString}");
 
             if (messageString != null)
             {

@@ -16,13 +16,9 @@
 
 #endregion
 
-using System;
 using System.Buffers;
-using System.Collections.Generic;
 using System.IO.Pipelines;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using Grpc.AspNetCore.Web.Internal;
 using Grpc.Tests.Shared;
 using NUnit.Framework;
@@ -171,7 +167,7 @@ namespace Grpc.AspNetCore.Server.Tests.Web
             buffer = w.GetMemory(initialData2.Length);
             initialData2.CopyTo(buffer);
             w.Advance(initialData2.Length);
-            
+
             w.Complete();
 
             // Assert

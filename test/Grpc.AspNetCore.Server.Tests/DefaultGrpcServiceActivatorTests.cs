@@ -16,8 +16,6 @@
 
 #endregion
 
-using System;
-using System.Threading.Tasks;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.Tests.Shared;
 using Moq;
@@ -30,17 +28,17 @@ namespace Grpc.AspNetCore.Server.Tests
     {
         public class GrpcService
         {
-            public bool Disposed { get; private set; } = false;
+            public bool Disposed { get; private set; }
             public void Dispose() => Disposed = true;
         }
         public class DisposableGrpcService : IDisposable
         {
-            public bool Disposed { get; private set; } = false;
+            public bool Disposed { get; private set; }
             public void Dispose() => Disposed = true;
         }
         public class AsyncDisposableGrpcService : DisposableGrpcService, IAsyncDisposable
         {
-            public bool AsyncDisposed { get; private set; } = false;
+            public bool AsyncDisposed { get; private set; }
 
             public ValueTask DisposeAsync()
             {

@@ -16,18 +16,11 @@
 
 #endregion
 
-using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.IO;
-using System.IO.Compression;
 using System.IO.Pipelines;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Compression;
 using Microsoft.Extensions.Logging;
@@ -75,13 +68,7 @@ namespace Grpc.AspNetCore.Server.Internal
 
                 if (flush)
                 {
-                    serverCallContext.HasBufferedMessage = false;
                     await pipeWriter.FlushAsync();
-                }
-                else
-                {
-                    // Set flag so buffered message will be written at the end
-                    serverCallContext.HasBufferedMessage = true;
                 }
 
                 GrpcServerLog.MessageSent(serverCallContext.Logger);
@@ -331,7 +318,7 @@ namespace Grpc.AspNetCore.Server.Internal
             }
         }
 
-        private static bool TryReadMessage(ref ReadOnlySequence<byte> buffer, HttpContextServerCallContext context, [NotNullWhen(true)]out ReadOnlySequence<byte>? message)
+        private static bool TryReadMessage(ref ReadOnlySequence<byte> buffer, HttpContextServerCallContext context, [NotNullWhen(true)] out ReadOnlySequence<byte>? message)
         {
             if (!TryReadHeader(buffer, out var compressed, out var messageLength))
             {
@@ -399,7 +386,7 @@ namespace Grpc.AspNetCore.Server.Internal
             return true;
         }
 
-        private static bool TryDecompressMessage(ILogger logger, string compressionEncoding, IReadOnlyDictionary<string, ICompressionProvider> compressionProviders, in ReadOnlySequence<byte> messageData, [NotNullWhen(true)]out ReadOnlySequence<byte>? result)
+        private static bool TryDecompressMessage(ILogger logger, string compressionEncoding, IReadOnlyDictionary<string, ICompressionProvider> compressionProviders, in ReadOnlySequence<byte> messageData, [NotNullWhen(true)] out ReadOnlySequence<byte>? result)
         {
             if (compressionProviders.TryGetValue(compressionEncoding, out var compressionProvider))
             {

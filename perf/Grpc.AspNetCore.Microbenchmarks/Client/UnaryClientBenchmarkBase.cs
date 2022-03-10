@@ -16,14 +16,8 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Threading.Tasks;
 using BenchmarkDotNet.Attributes;
 using Greet;
 using Grpc.AspNetCore.Microbenchmarks.Internal;
@@ -83,7 +77,7 @@ namespace Grpc.AspNetCore.Microbenchmarks.Client
         protected async Task InvokeSayHelloAsync(CallOptions options)
         {
             var response = await _client!.SayHelloAsync(new HelloRequest { Name = _content }, options).ResponseAsync;
-            
+
             if (response.Message != _content)
             {
                 throw new InvalidOperationException("Unexpected result.");

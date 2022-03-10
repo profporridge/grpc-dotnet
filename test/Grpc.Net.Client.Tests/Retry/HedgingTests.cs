@@ -16,15 +16,9 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
+using System.Globalization;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Google.Protobuf;
 using Greet;
 using Grpc.Core;
@@ -32,6 +26,9 @@ using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Internal.Http;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Tests.Shared;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using NUnit.Framework;
 
 namespace Grpc.Net.Client.Tests.Retry
@@ -279,16 +276,28 @@ namespace Grpc.Net.Client.Tests.Retry
         public async Task AsyncUnaryCall_ExceedDeadlineWithActiveCalls_Failure()
         {
             // Arrange
+            var testSink = new TestSink();
+            var services = new ServiceCollection();
+            services.AddLogging(b =>
+            {
+                b.AddProvider(new TestLoggerProvider(testSink));
+            });
+            services.AddNUnitLogger();
+            var provider = services.BuildServiceProvider();
+
             var tcs = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             var callCount = 0;
-            var httpClient = ClientTestHelpers.CreateTestClient(request =>
+            var httpClient = ClientTestHelpers.CreateTestClient(async (request, ct) =>
             {
+                // Ensure SendAsync call doesn't hang upon cancellation by gRPC client.
+                using var registration = ct.Register(() => tcs.TrySetCanceled());
+
                 Interlocked.Increment(ref callCount);
-                return tcs.Task;
+                return await tcs.Task;
             });
             var serviceConfig = ServiceConfigHelpers.CreateHedgingServiceConfig(hedgingDelay: TimeSpan.FromMilliseconds(200));
-            var invoker = HttpClientCallInvokerFactory.Create(httpClient, serviceConfig: serviceConfig);
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: provider.GetRequiredService<ILoggerFactory>(), serviceConfig: serviceConfig);
 
             // Act
             var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(deadline: DateTime.UtcNow.AddMilliseconds(100)), new HelloRequest { Name = "World" });
@@ -298,6 +307,9 @@ namespace Grpc.Net.Client.Tests.Retry
             var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
             Assert.AreEqual(StatusCode.DeadlineExceeded, ex.StatusCode);
             Assert.AreEqual(StatusCode.DeadlineExceeded, call.GetStatus().StatusCode);
+
+            var write = testSink.Writes.Single(w => w.EventId.Name == "CallCommited");
+            Assert.AreEqual("Call commited. Reason: DeadlineExceeded", write.State.ToString());
         }
 
         [Test]
@@ -353,7 +365,7 @@ namespace Grpc.Net.Client.Tests.Retry
                 Interlocked.Increment(ref callCount);
 
                 await request.Content!.CopyToAsync(new MemoryStream());
-                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.Unavailable, retryPushbackHeader: hedgeDelay.TotalMilliseconds.ToString());
+                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.Unavailable, retryPushbackHeader: hedgeDelay.TotalMilliseconds.ToString(CultureInfo.InvariantCulture));
             });
             var serviceConfig = ServiceConfigHelpers.CreateHedgingServiceConfig(maxAttempts: 2, hedgingDelay: hedgeDelay);
             var invoker = HttpClientCallInvokerFactory.Create(httpClient, serviceConfig: serviceConfig);
@@ -429,7 +441,7 @@ namespace Grpc.Net.Client.Tests.Retry
                 Interlocked.Increment(ref callCount);
 
                 await request.Content!.CopyToAsync(new MemoryStream());
-                string? hedgingPushback = hedgingDelay.TotalMilliseconds.ToString();
+                var hedgingPushback = hedgingDelay.TotalMilliseconds.ToString(CultureInfo.InvariantCulture);
                 if (callCount == 1)
                 {
                     hedgingPushback = "0";

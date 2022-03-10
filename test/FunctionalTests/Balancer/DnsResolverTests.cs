@@ -16,15 +16,17 @@
 
 #endregion
 
-#if NET5_0_OR_GREATER
+#if SUPPORT_LOAD_BALANCING
 
 using System;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client.Balancer;
 using Grpc.Net.Client.Internal;
 using Grpc.Tests.Shared;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 
 namespace Grpc.AspNetCore.FunctionalTests.Balancer
@@ -33,23 +35,28 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
     public class DnsResolverTests : FunctionalTestBase
     {
         [Test]
-        public async Task RefreshAsync_HasStarted_HasResult()
+        public async Task Refresh_HasStarted_HasResult()
         {
             // Arranged
-            ResolverResult? result = null;
+            var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            var dnsResolver = new DnsResolver(new Uri("dns:///localhost"), LoggerFactory, Timeout.InfiniteTimeSpan);
+            var dnsResolver = CreateDnsResolver(new Uri("dns:///localhost"));
             dnsResolver.Start(r =>
             {
-                result = r;
+                tcs.SetResult(r);
             });
 
             // Act
-            await dnsResolver.RefreshAsync(CancellationToken.None);
+            dnsResolver.Refresh();
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Greater(result!.Addresses!.Count, 0);
+            var result = await tcs.Task.DefaultTimeout();
+            Assert.Greater(result.Addresses!.Count, 0);
+        }
+
+        private DnsResolver CreateDnsResolver(Uri address, int? defaultPort = null, TimeSpan? refreshInterval = null)
+        {
+            return new DnsResolver(address, defaultPort ?? 80, LoggerFactory, refreshInterval ?? Timeout.InfiniteTimeSpan);
         }
 
         [Test]
@@ -61,7 +68,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             var testSystemClock = new TestSystemClock(DateTime.UtcNow);
 
-            var dnsResolver = new DnsResolver(new Uri("dns:///localhost"), LoggerFactory, TimeSpan.FromSeconds(0.05));
+            var dnsResolver = CreateDnsResolver(new Uri("dns:///localhost"), refreshInterval: TimeSpan.FromSeconds(0.05));
             dnsResolver.SystemClock = testSystemClock;
 
             // Act
@@ -88,8 +95,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             // Arrange
             SetExpectedErrorsFilter(writeContext =>
             {
-                if (writeContext.State.ToString() == "Error querying DNS hosts for 'dns://localhost/'." &&
-                    writeContext.Exception!.Message == "Resolver address 'dns://localhost/' doesn't have a path.")
+                if (writeContext.State.ToString() == "Error querying DNS hosts for ''." &&
+                    writeContext.Exception!.Message == "Resolver address 'dns://localhost/' is not valid. Please use dns:/// for DNS provider.")
                 {
                     return true;
                 }
@@ -97,55 +104,52 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
                 return false;
             });
 
-            ResolverResult? result = null;
-
-            var dnsResolver = new DnsResolver(new Uri("dns://localhost"), LoggerFactory, Timeout.InfiniteTimeSpan);
+            var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dnsResolver = CreateDnsResolver(address: new Uri("dns://localhost"));
             dnsResolver.Start(r =>
             {
-                result = r;
+                tcs.SetResult(r);
             });
 
             // Act
-            await dnsResolver.RefreshAsync(CancellationToken.None);
+            dnsResolver.Refresh();
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Null(result!.Addresses);
-            Assert.AreEqual(StatusCode.Unavailable, result!.Status.StatusCode);
-            Assert.AreEqual("Error getting DNS hosts for address 'dns://localhost/'. InvalidOperationException: Resolver address 'dns://localhost/' doesn't have a path.", result!.Status.Detail);
-            Assert.AreEqual("Resolver address 'dns://localhost/' doesn't have a path.", result!.Status.DebugException.Message);
+            var result = await tcs.Task.DefaultTimeout();
+
+            Assert.AreEqual(StatusCode.Unavailable, result.Status.StatusCode);
+            Assert.AreEqual("Error getting DNS hosts for address ''. InvalidOperationException: Resolver address 'dns://localhost/' is not valid. Please use dns:/// for DNS provider.", result!.Status.Detail);
+            Assert.AreEqual("Resolver address 'dns://localhost/' is not valid. Please use dns:/// for DNS provider.", result!.Status.DebugException!.Message);
         }
 
         [Test]
         public async Task RefreshAsync_MultipleCalls_HitRateLimit()
         {
             // Arrange
-            ResolverResult? result = null;
-
-            var dnsResolver = new DnsResolver(new Uri("dns:///localhost"), LoggerFactory, Timeout.InfiniteTimeSpan);
+            var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dnsResolver = CreateDnsResolver(new Uri("dns:///localhost"));
             dnsResolver.Start(r =>
             {
-                result = r;
+                tcs.SetResult(r);
             });
 
             // Act
-            await dnsResolver.RefreshAsync(CancellationToken.None).DefaultTimeout();
+            dnsResolver.Refresh();
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Greater(result!.Addresses!.Count, 0);
+            var result = await tcs.Task.DefaultTimeout();
+            Assert.Greater(result.Addresses!.Count, 0);
 
-            var refreshTask1 = dnsResolver.RefreshAsync(CancellationToken.None);
+            // Wait for the internal resolve task to be completed before triggering refresh again
+            await dnsResolver._resolveTask.DefaultTimeout();
+            tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            dnsResolver.Refresh();
 
-            var completedTask = await Task.WhenAny(refreshTask1, Task.Delay(TimeSpan.FromSeconds(0.5))).DefaultTimeout();
-            if (completedTask == refreshTask1)
+            var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(0.5))).DefaultTimeout();
+            if (completedTask == tcs.Task)
             {
                 Assert.Fail("Expected refresh to be delayed.");
             }
-
-            // Refresh is already in progress so existing task is returned.
-            var refreshTask2 = dnsResolver.RefreshAsync(CancellationToken.None);
-            Assert.AreSame(refreshTask1, refreshTask2);
         }
 
         [Test]
@@ -153,7 +157,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
         {
             SetExpectedErrorsFilter(writeContext =>
             {
-                if (writeContext.State.ToString() == "Error querying DNS hosts for 'dns:///localhost'." &&
+                if (writeContext.State.ToString() == "Error querying DNS hosts for 'localhost'." &&
                     writeContext.Exception!.Message == "A task was canceled.")
                 {
                     return true;
@@ -163,33 +167,103 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             });
 
             // Arrange
-            ResolverResult? result = null;
-
-            var cts = new CancellationTokenSource();
-            var dnsResolver = new DnsResolver(new Uri("dns:///localhost"), LoggerFactory, Timeout.InfiniteTimeSpan);
+            var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dnsResolver = CreateDnsResolver(new Uri("dns:///localhost"));
             dnsResolver.Start(r =>
             {
-                result = r;
+                tcs.SetResult(r);
             });
 
             // Act
-            await dnsResolver.RefreshAsync(cts.Token).DefaultTimeout();
+            dnsResolver.Refresh();
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Greater(result!.Addresses!.Count, 0);
+            var result = await tcs.Task.DefaultTimeout();
+            Assert.Greater(result.Addresses!.Count, 0);
 
-            var refreshTask = dnsResolver.RefreshAsync(cts.Token);
+            // Wait for the internal resolve task to be completed before triggering refresh again
+            await dnsResolver._resolveTask.DefaultTimeout();
+            tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            dnsResolver.Refresh();
 
-            cts.Cancel();
+            dnsResolver.Dispose();
 
-            await refreshTask.DefaultTimeout();
+            result = await tcs.Task.DefaultTimeout();
+            Assert.AreEqual(StatusCode.Unavailable, result.Status.StatusCode);
+            Assert.AreEqual("Error getting DNS hosts for address 'localhost'. TaskCanceledException: A task was canceled.", result.Status.Detail);
+            Assert.AreEqual("A task was canceled.", result.Status.DebugException!.Message);
+        }
 
-            Assert.NotNull(result);
-            Assert.Null(result!.Addresses);
-            Assert.AreEqual(StatusCode.Unavailable, result!.Status.StatusCode);
-            Assert.AreEqual("Error getting DNS hosts for address 'dns:///localhost'. TaskCanceledException: A task was canceled.", result!.Status.Detail);
-            Assert.AreEqual("A task was canceled.", result!.Status.DebugException.Message);
+        [Test]
+        public async Task DNS_Port_Works()
+        {
+            const int defaultPort = 1234; // Will be ignored because port is specified in address
+            const int specifiedPort = 8080;
+
+            var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dnsResolver = CreateDnsResolver(new Uri($"dns:///localhost:{specifiedPort}"), defaultPort);
+            dnsResolver.Start(r =>
+            {
+                tcs.SetResult(r);
+            });
+
+            // Act
+            dnsResolver.Refresh();
+
+            // Assert
+            Assert.False(HasLogException((ex) =>
+            {
+                return ex is SocketException;
+            }));
+
+            var result = await tcs.Task.DefaultTimeout();
+            Assert.AreEqual(StatusCode.OK, result.Status.StatusCode);
+
+            var addresses = result.Addresses!;
+            Logger.LogInformation($"Got {addresses.Count} addresses.");
+
+            // Note: addresses returned from localhost depend on operating system.
+            // Validate whatever we get back has the specified port.
+            for (var i = 0; i < addresses.Count; i++)
+            {
+                var address = addresses[i];
+
+                Logger.LogInformation($"Address: {address}");
+                Assert.AreEqual(specifiedPort, address.EndPoint.Port);
+            }
+        }
+
+        [Test]
+        public async Task DefaultPort_Localhost_AddressesHaveDefaultPort()
+        {
+            const int defaultPort = 8081;
+
+            var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dnsResolver = CreateDnsResolver(new Uri("dns:///localhost"), defaultPort);
+            dnsResolver.Start(r =>
+            {
+                tcs.SetResult(r);
+            });
+
+            // Act
+            dnsResolver.Refresh();
+
+            // Assert
+            var result = await tcs.Task.DefaultTimeout();
+            Assert.AreEqual(StatusCode.OK, result.Status.StatusCode);
+
+            var addresses = result.Addresses!;
+            Logger.LogInformation($"Got {addresses.Count} addresses.");
+
+            // Note: addresses returned from localhost depend on operating system.
+            // Validate whatever we get back has the specified port.
+            for (var i = 0; i < addresses.Count; i++)
+            {
+                var address = addresses[i];
+
+                Logger.LogInformation($"Address: {address}");
+                Assert.AreEqual(defaultPort, address.EndPoint.Port);
+            }
         }
 
         private class TestSystemClock : ISystemClock

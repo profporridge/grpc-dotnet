@@ -16,9 +16,7 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace Grpc.Tests.Shared
 {
@@ -31,9 +29,16 @@ namespace Grpc.Tests.Shared
             return resolvedPath;
         }
 
-        public static async Task AssertIsTrueRetryAsync(Func<bool> assert, string message)
+        public static Task AssertIsTrueRetryAsync(Func<bool> assert, string message, ILogger? logger = null)
+        {
+            return AssertIsTrueRetryAsync(() => Task.FromResult(assert()), message, logger);
+        }
+
+        public static async Task AssertIsTrueRetryAsync(Func<Task<bool>> assert, string message, ILogger? logger = null)
         {
             const int Retries = 10;
+
+            logger?.LogInformation("Start: " + message);
 
             for (var i = 0; i < Retries; i++)
             {
@@ -42,8 +47,9 @@ namespace Grpc.Tests.Shared
                     await Task.Delay((i + 1) * (i + 1) * 10);
                 }
 
-                if (assert())
+                if (await assert())
                 {
+                    logger?.LogInformation("End: " + message);
                     return;
                 }
             }

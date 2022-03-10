@@ -16,12 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics.Tracing;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
@@ -35,7 +30,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
     [TestFixture]
     public class EventSourceTests : FunctionalTestBase
     {
-        private static Dictionary<string, string?> EnableCountersArgs =
+        private static readonly Dictionary<string, string?> EnableCountersArgs =
             new Dictionary<string, string?>
             {
                 ["EventCounterIntervalSec"] = "0.001"
@@ -51,6 +46,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
         [Test]
         public async Task UnaryMethod_SuccessfulCall_PollingCountersUpdatedCorrectly()
         {
+            using var httpEventSource = new HttpEventSourceListener(LoggerFactory);
+
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             async Task<HelloReply> UnarySuccess(HelloRequest request, ServerCallContext context)
@@ -158,7 +155,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
 
             var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync.DefaultTimeout()).DefaultTimeout();
             Assert.AreEqual(StatusCode.Unknown, ex.StatusCode);
-            Assert.AreEqual("Exception was thrown by handler. Exception: Error! Exception: Nested error!", ex.Status.Detail);                
+            Assert.AreEqual("Exception was thrown by handler. Exception: Error! Exception: Nested error!", ex.Status.Detail);
 
             // Assert - Call complete
             await AssertCounters("Server call in complete", serverEventListener, new Dictionary<string, long>
@@ -201,21 +198,20 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
                 }
 
                 // Arrange
-                var clock = new TestSystemClock(DateTime.UtcNow);
                 var clientEventListener = CreateEnableListener(Grpc.Net.Client.Internal.GrpcEventSource.Log);
                 var serverEventListener = CreateEnableListener(Grpc.AspNetCore.Server.Internal.GrpcEventSource.Log);
 
                 // Act - Start call
                 var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(UnaryDeadlineExceeded);
 
-                var channel = CreateChannel();
-                channel.Clock = clock;
+                using var channel = CreateChannel();
+                // Force client to handle deadline status from call
                 channel.DisableClientDeadline = true;
 
                 var client = TestClientFactory.Create(channel, method);
 
                 // Need a high deadline to avoid flakiness. No way to disable server deadline timer.
-                var deadline = clock.UtcNow.AddMilliseconds(500);
+                var deadline = DateTime.UtcNow.AddMilliseconds(500);
                 var call = client.UnaryCall(new HelloRequest(), new CallOptions(deadline: deadline));
 
                 // Assert - Call in progress
@@ -256,12 +252,30 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
         [Test]
         public async Task UnaryMethod_CancelCall_PollingCountersUpdatedCorrectly()
         {
+            SyncPoint? syncPoint = null;
+            async Task<HelloReply> UnaryCancel(HelloRequest request, ServerCallContext context)
+            {
+                var tcs = new TaskCompletionSource<HelloReply>(TaskCreationOptions.RunContinuationsAsynchronously);
+                context.CancellationToken.Register(() => tcs.SetCanceled());
+
+                Logger.LogInformation("On server.");
+                await syncPoint!.WaitToContinue().DefaultTimeout();
+
+                return await tcs.Task;
+            }
+
+            var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(UnaryCancel);
+
+            using var channel = CreateChannel();
+
+            var client = TestClientFactory.Create(channel, method);
+
             // Loop to ensure test is resilent across multiple runs
             for (var i = 1; i < 3; i++)
             {
                 Logger.LogInformation($"Iteration {i}");
 
-                var syncPoint = new SyncPoint();
+                syncPoint = new SyncPoint();
                 var cts = new CancellationTokenSource();
 
                 // Ignore errors
@@ -270,26 +284,12 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
                     return true;
                 });
 
-                async Task<HelloReply> UnaryCancel(HelloRequest request, ServerCallContext context)
-                {
-                    Logger.LogInformation("On server.");
-                    await syncPoint.WaitToContinue().DefaultTimeout();
-
-                    return new HelloReply();
-                }
-
                 // Arrange
                 var clock = new TestSystemClock(DateTime.UtcNow);
                 using var clientEventListener = CreateEnableListener(Grpc.Net.Client.Internal.GrpcEventSource.Log);
                 using var serverEventListener = CreateEnableListener(Grpc.AspNetCore.Server.Internal.GrpcEventSource.Log);
 
                 // Act - Start call
-                var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(UnaryCancel);
-
-                var channel = CreateChannel();
-
-                var client = TestClientFactory.Create(channel, method);
-
                 var call = client.UnaryCall(new HelloRequest(), new CallOptions(cancellationToken: cts.Token));
 
                 // Assert - Call in progress
@@ -458,7 +458,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
 
         private TestEventListener CreateEnableListener(EventSource eventSource)
         {
-            var listener = new TestEventListener(-1, LoggerFactory);
+            var listener = new TestEventListener(-1, LoggerFactory, eventSource);
             listener.EnableEvents(eventSource, EventLevel.LogAlways, EventKeywords.All, EnableCountersArgs);
             return listener;
         }

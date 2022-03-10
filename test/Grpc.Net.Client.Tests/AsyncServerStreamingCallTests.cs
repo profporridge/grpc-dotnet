@@ -16,12 +16,7 @@
 
 #endregion
 
-using System;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
@@ -355,7 +350,7 @@ namespace Grpc.Net.Client.Tests
             Assert.IsTrue(responseMessage!.TrailingHeaders().TryGetValues(GrpcProtocolConstants.StatusTrailer, out _)); // sanity status is in trailers
 
             Assert.AreEqual(StatusCode.OK, call.GetStatus().StatusCode);
-            Assert.AreEqual(null, call.GetStatus().Detail);
+            Assert.AreEqual(string.Empty, call.GetStatus().Detail);
 
             Assert.AreEqual(0, headers.Count);
             Assert.AreEqual(0, call.GetTrailers().Count);

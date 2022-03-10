@@ -16,8 +16,6 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Security.Cryptography.X509Certificates;
@@ -75,7 +73,7 @@ namespace Grpc.AspNetCore.Server.Internal
             return false;
         }
 
-        public static bool IsInvalidContentType(HttpContext httpContext, [NotNullWhen(true)]out string? error)
+        public static bool IsInvalidContentType(HttpContext httpContext, [NotNullWhen(true)] out string? error)
         {
             if (httpContext.Request.ContentType == null)
             {
@@ -97,7 +95,7 @@ namespace Grpc.AspNetCore.Server.Internal
             return HttpMethods.IsOptions(httpContext.Request.Method) &&
                 httpContext.Request.Headers.ContainsKey(HeaderNames.AccessControlRequestMethod);
         }
-        
+
         public static void BuildHttpErrorResponse(HttpResponse response, int httpStatusCode, StatusCode grpcStatusCode, string message)
         {
             response.StatusCode = httpStatusCode;
@@ -206,7 +204,8 @@ namespace Grpc.AspNetCore.Server.Internal
                 }
             }
 
-            return new AuthContext(peerIdentityPropertyName, properties);
+            // TODO(JamesNK): Remove nullable override after Grpc.Core.Api update
+            return new AuthContext(peerIdentityPropertyName!, properties);
 
             static void AddProperty(Dictionary<string, List<AuthProperty>> properties, string name, string value)
             {

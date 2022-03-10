@@ -16,7 +16,6 @@
 
 #endregion
 
-using System;
 using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.AspNetCore.Server.Model.Internal;
@@ -30,10 +29,6 @@ namespace Microsoft.AspNetCore.Builder
     /// </summary>
     public static class GrpcEndpointRouteBuilderExtensions
     {
-#if NET5_0_OR_GREATER
-        private const DynamicallyAccessedMemberTypes ServiceAccessibility = DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods;
-#endif
-
         /// <summary>
         /// Maps incoming requests to the specified <typeparamref name="TService"/> type.
         /// </summary>
@@ -42,7 +37,7 @@ namespace Microsoft.AspNetCore.Builder
         /// <returns>A <see cref="GrpcServiceEndpointConventionBuilder"/> for endpoints associated with the service.</returns>
         public static GrpcServiceEndpointConventionBuilder MapGrpcService<
 #if NET5_0_OR_GREATER
-            [DynamicallyAccessedMembers(ServiceAccessibility)]
+            [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
 #endif
             TService>(this IEndpointRouteBuilder builder) where TService : class
         {

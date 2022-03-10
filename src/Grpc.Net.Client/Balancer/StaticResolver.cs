@@ -23,6 +23,7 @@ using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace Grpc.Net.Client.Balancer
 {
@@ -34,55 +35,21 @@ namespace Grpc.Net.Client.Balancer
     /// </summary>
     internal sealed class StaticResolver : Resolver
     {
-        private readonly List<DnsEndPoint> _addresses;
-        private Action<ResolverResult>? _listener;
-        private bool _disposed;
+        private readonly List<BalancerAddress> _addresses;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="StaticResolver"/> class with the specified addresses.
         /// </summary>
         /// <param name="addresses">The resolved addresses.</param>
-        public StaticResolver(IEnumerable<DnsEndPoint> addresses)
+        public StaticResolver(IEnumerable<BalancerAddress> addresses)
         {
             _addresses = addresses.ToList();
         }
 
-        /// <inheritdoc />
-        public override Task RefreshAsync(CancellationToken cancellationToken)
-        {
-            if (_disposed)
-            {
-                throw new ObjectDisposedException(nameof(DnsResolver));
-            }
-            if (_listener == null)
-            {
-                throw new InvalidOperationException("Resolver hasn't been started.");
-            }
-
-            _listener(ResolverResult.ForResult(_addresses, serviceConfig: null));
-            return Task.CompletedTask;
-        }
-
-        /// <inheritdoc />
         public override void Start(Action<ResolverResult> listener)
         {
-            if (_disposed)
-            {
-                throw new ObjectDisposedException(nameof(DnsResolver));
-            }
-            if (_listener != null)
-            {
-                throw new InvalidOperationException("Resolver has already been started.");
-            }
-
-            _listener = listener;
-        }
-
-        /// <inheritdoc />
-        protected override void Dispose(bool disposing)
-        {
-            base.Dispose(disposing);
-            _disposed = true;
+            // Send addresses to listener once. They will never change.
+            listener(ResolverResult.ForResult(_addresses, serviceConfig: null, serviceConfigStatus: null));
         }
     }
 
@@ -95,7 +62,7 @@ namespace Grpc.Net.Client.Balancer
     /// </summary>
     public sealed class StaticResolverFactory : ResolverFactory
     {
-        private readonly Func<Uri, IEnumerable<DnsEndPoint>> _addressesCallback;
+        private readonly Func<Uri, IEnumerable<BalancerAddress>> _addressesCallback;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="StaticResolverFactory"/> class with a callback
@@ -104,7 +71,7 @@ namespace Grpc.Net.Client.Balancer
         /// <param name="addressesCallback">
         /// A callback that returns a collection of addresses for a target <see cref="Uri"/>.
         /// </param>
-        public StaticResolverFactory(Func<Uri, IEnumerable<DnsEndPoint>> addressesCallback)
+        public StaticResolverFactory(Func<Uri, IEnumerable<BalancerAddress>> addressesCallback)
         {
             _addressesCallback = addressesCallback;
         }

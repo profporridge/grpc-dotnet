@@ -16,12 +16,8 @@
 
 #endregion
 
-using System;
 using System.Buffers;
-using System.Collections.Generic;
-using System.IO;
 using System.IO.Pipelines;
-using System.Threading.Tasks;
 using BenchmarkDotNet.Attributes;
 using Chat;
 using Google.Protobuf;
@@ -29,7 +25,6 @@ using Grpc.AspNetCore.Microbenchmarks.Internal;
 using Grpc.AspNetCore.Server;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.AspNetCore.Server.Internal.CallHandlers;
-using Grpc.AspNetCore.Server.Model;
 using Grpc.Core;
 using Grpc.Net.Compression;
 using Grpc.Shared.Server;
@@ -56,6 +51,8 @@ namespace Grpc.AspNetCore.Microbenchmarks.Server
         protected InterceptorCollection? Interceptors { get; set; }
         protected List<ICompressionProvider>? CompressionProviders { get; set; }
         protected string? ResponseCompressionAlgorithm { get; set; }
+        protected Grpc.AspNetCore.Server.Model.UnaryServerMethod<TestService, ChatMessage, ChatMessage>? Method { get; set; }
+        protected string ExpectedStatus { get; set; } = "0";
 
         [GlobalSetup]
         public void GlobalSetup()
@@ -76,11 +73,11 @@ namespace Grpc.AspNetCore.Microbenchmarks.Server
 
             var marshaller = CreateMarshaller();
 
-            var method = new Method<ChatMessage, ChatMessage>(MethodType.Unary, typeof(TestService).FullName, nameof(TestService.SayHello), marshaller, marshaller);
+            var method = new Method<ChatMessage, ChatMessage>(MethodType.Unary, typeof(TestService).FullName!, nameof(TestService.SayHello), marshaller, marshaller);
             var result = Task.FromResult(message);
             _callHandler = new UnaryServerCallHandler<TestService, ChatMessage, ChatMessage>(
                 new UnaryServerMethodInvoker<TestService, ChatMessage, ChatMessage>(
-                    (service, request, context) => result,
+                    Method ?? ((service, request, context) => result),
                     method,
                     HttpContextServerCallContextHelper.CreateMethodOptions(
                         compressionProviders: CompressionProviders,
@@ -140,7 +137,7 @@ namespace Grpc.AspNetCore.Microbenchmarks.Server
             StringValues value;
             if (_trailers.TryGetValue("grpc-status", out value) || _headers.TryGetValue("grpc-status", out value))
             {
-                if (!value.Equals("0"))
+                if (!value.Equals(ExpectedStatus))
                 {
                     throw new InvalidOperationException("Unexpected grpc-status: " + Enum.Parse<StatusCode>(value));
                 }

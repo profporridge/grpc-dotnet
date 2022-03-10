@@ -16,12 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Grpc.Net.Client;
+using Grpc.Core;
 using Grpc.Net.Client.Balancer;
 using Grpc.Net.Client.Configuration;
 
@@ -60,20 +55,6 @@ namespace Frontend.Balancer
                 _balancerConfiguration.Updated += OnConfigurationUpdated;
             }
 
-            private void OnConfigurationUpdated(object? sender, EventArgs e)
-            {
-                // Can't just call RefreshAsync and get new results because of rate limiting.
-                if (_listener != null && _lastResult != null)
-                {
-                    RaiseResult(_listener, _lastResult);
-                }
-            }
-
-            public override Task RefreshAsync(CancellationToken cancellationToken)
-            {
-                return _innerResolver.RefreshAsync(cancellationToken);
-            }
-
             public override void Start(Action<ResolverResult> listener)
             {
                 _listener = listener;
@@ -81,34 +62,51 @@ namespace Frontend.Balancer
                 {
                     _lastResult = result;
 
-                    RaiseResult(_listener, result);
+                    RaiseResult(result);
                 });
             }
 
-            private void RaiseResult(Action<ResolverResult> listener, ResolverResult result)
+            public override void Refresh()
             {
-                if (result.Addresses != null)
+                _innerResolver.Refresh();
+            }
+
+            private void OnConfigurationUpdated(object? sender, EventArgs e)
+            {
+                // Can't just call RefreshAsync and get new results because of rate limiting.
+                if (_lastResult != null)
                 {
-                    var policyName = _balancerConfiguration.LoadBalancerPolicyName switch
-                    {
-                        LoadBalancerName.PickFirst => "pick_first",
-                        LoadBalancerName.RoundRobin => "round_robin",
-                        _ => throw new InvalidOperationException("Unexpected load balancer.")
-                    };
-
-                    var serviceConfig = new ServiceConfig
-                    {
-                        LoadBalancingConfigs = { new LoadBalancingConfig(policyName) }
-                    };
-
-                    // DNS results change order between refreshes.
-                    // Explicitly order by host to keep result order consistent.
-                    var orderedAddresses = result.Addresses!.OrderBy(a => a.Host).ToList();
-                    listener(ResolverResult.ForResult(orderedAddresses, serviceConfig));
+                    RaiseResult(_lastResult);
                 }
-                else
+            }
+
+            private void RaiseResult(ResolverResult result)
+            {
+                if (_listener != null)
                 {
-                    listener(ResolverResult.ForFailure(result.Status));
+                    if (result.Addresses != null)
+                    {
+                        var policyName = _balancerConfiguration.LoadBalancerPolicyName switch
+                        {
+                            LoadBalancerName.PickFirst => "pick_first",
+                            LoadBalancerName.RoundRobin => "round_robin",
+                            _ => throw new InvalidOperationException("Unexpected load balancer.")
+                        };
+
+                        var serviceConfig = new ServiceConfig
+                        {
+                            LoadBalancingConfigs = { new LoadBalancingConfig(policyName) }
+                        };
+
+                        // DNS results change order between refreshes.
+                        // Explicitly order by host to keep result order consistent.
+                        var orderedAddresses = result.Addresses.OrderBy(a => a.EndPoint.Host).ToList();
+                        _listener(ResolverResult.ForResult(orderedAddresses, serviceConfig, Status.DefaultSuccess));
+                    }
+                    else
+                    {
+                        _listener(ResolverResult.ForFailure(result.Status));
+                    }
                 }
             }
         }

@@ -16,7 +16,6 @@
 
 #endregion
 
-using System.IO;
 using System.IO.Compression;
 
 namespace Grpc.Net.Compression
@@ -24,7 +23,7 @@ namespace Grpc.Net.Compression
     /// <summary>
     /// GZIP compression provider.
     /// </summary>
-    public class GzipCompressionProvider : ICompressionProvider
+    public sealed class GzipCompressionProvider : ICompressionProvider
     {
         private readonly CompressionLevel _defaultCompressionLevel;
 

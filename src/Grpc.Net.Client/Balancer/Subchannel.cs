@@ -43,10 +43,18 @@ namespace Grpc.Net.Client.Balancer
     /// </summary>
     public sealed class Subchannel : IDisposable
     {
-        internal readonly List<DnsEndPoint> _addresses;
+        internal readonly List<BalancerAddress> _addresses;
         internal readonly object Lock;
         internal ISubchannelTransport Transport { get; set; } = default!;
         internal int Id { get; }
+
+        /// <summary>
+        /// Connectivity state is internal rather than public because it can be updated by multiple threads while
+        /// a load balancer is building the picker.
+        /// Load balancers that care about multiple subchannels should track state by subscribing to
+        /// Subchannel.OnStateChanged and storing results.
+        /// </summary>
+        internal ConnectivityState State => _state;
 
         private readonly ConnectionManager _manager;
         private readonly ILogger _logger;
@@ -58,19 +66,14 @@ namespace Grpc.Net.Client.Balancer
         /// <summary>
         /// Gets the current connected address.
         /// </summary>
-        public DnsEndPoint? CurrentAddress => Transport.CurrentEndPoint;
-
-        /// <summary>
-        /// Gets the connectivity state.
-        /// </summary>
-        public ConnectivityState State => _state;
+        public BalancerAddress? CurrentAddress => Transport.CurrentAddress;
 
         /// <summary>
         /// Gets the metadata attributes.
         /// </summary>
         public BalancerAttributes Attributes { get; }
 
-        internal Subchannel(ConnectionManager manager, IReadOnlyList<DnsEndPoint> addresses)
+        internal Subchannel(ConnectionManager manager, IReadOnlyList<BalancerAddress> addresses)
         {
             Lock = new object();
             _logger = manager.LoggerFactory.CreateLogger(GetType());
@@ -128,12 +131,12 @@ namespace Grpc.Net.Client.Balancer
         /// </para>
         /// </summary>
         /// <param name="addresses"></param>
-        public void UpdateAddresses(IReadOnlyList<DnsEndPoint> addresses)
+        public void UpdateAddresses(IReadOnlyList<BalancerAddress> addresses)
         {
             var requireReconnect = false;
             lock (Lock)
             {
-                if (_addresses.SequenceEqual(addresses))
+                if (_addresses.SequenceEqual(addresses, BalancerAddressEqualityComparer.Instance))
                 {
                     // Don't do anything if new addresses match existing addresses.
                     return;
@@ -165,8 +168,8 @@ namespace Grpc.Net.Client.Balancer
                     default:
                         throw new ArgumentOutOfRangeException("state", _state, "Unexpected state.");
                 }
-
             }
+
             if (requireReconnect)
             {
                 _connectCts?.Cancel();
@@ -188,7 +191,7 @@ namespace Grpc.Net.Client.Balancer
                         SubchannelLog.ConnectionRequested(_logger, Id);
 
                         // Only start connecting underlying transport if in an idle state.
-                        UpdateConnectivityState(ConnectivityState.Connecting);
+                        UpdateConnectivityState(ConnectivityState.Connecting, "Connection requested.");
                         break;
                     case ConnectivityState.Connecting:
                     case ConnectivityState.Ready:
@@ -277,11 +280,16 @@ namespace Grpc.Net.Client.Balancer
             {
                 SubchannelLog.ConnectError(_logger, Id, ex);
 
-                UpdateConnectivityState(ConnectivityState.TransientFailure);
+                UpdateConnectivityState(ConnectivityState.TransientFailure, "Error connecting to subchannel.");
             }
         }
 
-        internal bool UpdateConnectivityState(ConnectivityState state, Status? status = null)
+        internal bool UpdateConnectivityState(ConnectivityState state, string successDetail)
+        {
+            return UpdateConnectivityState(state, new Status(StatusCode.OK, successDetail));
+        }
+        
+        internal bool UpdateConnectivityState(ConnectivityState state, Status status)
         {
             lock (Lock)
             {
@@ -299,13 +307,13 @@ namespace Grpc.Net.Client.Balancer
             }
             
             // Notify channel outside of lock to avoid deadlocks.
-            _manager.OnSubchannelStateChange(this, state, status ?? Status.DefaultSuccess);
+            _manager.OnSubchannelStateChange(this, state, status);
             return true;
         }
 
         internal void RaiseStateChanged(ConnectivityState state, Status status)
         {
-            SubchannelLog.SubchannelStateChanged(_logger, Id, state);
+            SubchannelLog.SubchannelStateChanged(_logger, Id, state, status);
 
             if (_stateChangedRegistrations.Count > 0)
             {
@@ -322,7 +330,7 @@ namespace Grpc.Net.Client.Balancer
         {
             lock (Lock)
             {
-                return $"Id: {Id}, Addresses: {string.Join(", ", _addresses)}, State: {State}";
+                return $"Id: {Id}, Addresses: {string.Join(", ", _addresses)}, State: {_state}, Current address: {CurrentAddress}";
             }
         }
 
@@ -330,7 +338,7 @@ namespace Grpc.Net.Client.Balancer
         /// Returns the addresses that this subchannel is bound to.
         /// </summary>
         /// <returns>The addresses that this subchannel is bound to.</returns>
-        public IReadOnlyList<DnsEndPoint> GetAddresses()
+        public IReadOnlyList<BalancerAddress> GetAddresses()
         {
             lock (Lock)
             {
@@ -340,12 +348,12 @@ namespace Grpc.Net.Client.Balancer
 
         /// <summary>
         /// Disposes the <see cref="Subchannel"/>.
-        /// The subchannel <see cref="State"/> is updated to <see cref="ConnectivityState.Shutdown"/>.
+        /// The subchannel state is updated to <see cref="ConnectivityState.Shutdown"/>.
         /// After dispose the subchannel should no longer be returned by the latest <see cref="SubchannelPicker"/>.
         /// </summary>
         public void Dispose()
         {
-            UpdateConnectivityState(ConnectivityState.Shutdown);
+            UpdateConnectivityState(ConnectivityState.Shutdown, "Subchannel disposed.");
             _stateChangedRegistrations.Clear();
             Transport.Dispose();
             _connectCts?.Cancel();
@@ -358,40 +366,40 @@ namespace Grpc.Net.Client.Balancer
             LoggerMessage.Define<int, string>(LogLevel.Debug, new EventId(1, "SubchannelCreated"), "Subchannel id '{SubchannelId}' created with addresses: {Addresses}");
 
         private static readonly Action<ILogger, int, Exception?> _addressesUpdatedWhileConnecting =
-            LoggerMessage.Define<int>(LogLevel.Debug, new EventId(1, "AddressesUpdatedWhileConnecting"), "Subchannel id '{SubchannelId}' is connecting when its addresses are updated. Restarting connect.");
+            LoggerMessage.Define<int>(LogLevel.Debug, new EventId(2, "AddressesUpdatedWhileConnecting"), "Subchannel id '{SubchannelId}' is connecting when its addresses are updated. Restarting connect.");
 
-        private static readonly Action<ILogger, int, DnsEndPoint, Exception?> _connectedAddressNotInUpdatedAddresses =
-            LoggerMessage.Define<int, DnsEndPoint>(LogLevel.Debug, new EventId(1, "ConnectedAddressNotInUpdatedAddresses"), "Subchannel id '{SubchannelId}' current address '{CurrentAddress}' is not in the updated addresses.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _connectedAddressNotInUpdatedAddresses =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Debug, new EventId(3, "ConnectedAddressNotInUpdatedAddresses"), "Subchannel id '{SubchannelId}' current address '{CurrentAddress}' is not in the updated addresses.");
 
         private static readonly Action<ILogger, int, Exception?> _connectionRequested =
-            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(1, "ConnectionRequested"), "Subchannel id '{SubchannelId}' connection requested.");
+            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(4, "ConnectionRequested"), "Subchannel id '{SubchannelId}' connection requested.");
 
         private static readonly Action<ILogger, int, ConnectivityState, Exception?> _connectionRequestedInNonIdleState =
-            LoggerMessage.Define<int, ConnectivityState>(LogLevel.Debug, new EventId(1, "ConnectionRequestedInNonIdleState"), "Subchannel id '{SubchannelId}' connection requested in non-idle state of {State}.");
+            LoggerMessage.Define<int, ConnectivityState>(LogLevel.Debug, new EventId(5, "ConnectionRequestedInNonIdleState"), "Subchannel id '{SubchannelId}' connection requested in non-idle state of {State}.");
 
         private static readonly Action<ILogger, int, Exception?> _connectingTransport =
-            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(1, "ConnectingTransport"), "Subchannel id '{SubchannelId}' connecting to transport.");
+            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(6, "ConnectingTransport"), "Subchannel id '{SubchannelId}' connecting to transport.");
 
         private static readonly Action<ILogger, int, TimeSpan, Exception?> _startingConnectBackoff =
-            LoggerMessage.Define<int, TimeSpan>(LogLevel.Trace, new EventId(1, "StartingConnectBackoff"), "Subchannel id '{SubchannelId}' starting connect backoff of {BackoffDuration}.");
+            LoggerMessage.Define<int, TimeSpan>(LogLevel.Trace, new EventId(7, "StartingConnectBackoff"), "Subchannel id '{SubchannelId}' starting connect backoff of {BackoffDuration}.");
 
         private static readonly Action<ILogger, int, Exception?> _connectBackoffInterrupted =
-            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(1, "ConnectBackoffInterrupted"), "Subchannel id '{SubchannelId}' connect backoff interrupted.");
+            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(8, "ConnectBackoffInterrupted"), "Subchannel id '{SubchannelId}' connect backoff interrupted.");
 
         private static readonly Action<ILogger, int, Exception?> _connectCanceled =
-            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(1, "ConnectCanceled"), "Subchannel id '{SubchannelId}' connect canceled.");
+            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(9, "ConnectCanceled"), "Subchannel id '{SubchannelId}' connect canceled.");
 
         private static readonly Action<ILogger, int, Exception?> _connectError =
-            LoggerMessage.Define<int>(LogLevel.Error, new EventId(1, "ConnectError"), "Subchannel id '{SubchannelId}' error while connecting to transport.");
+            LoggerMessage.Define<int>(LogLevel.Debug, new EventId(10, "ConnectError"), "Subchannel id '{SubchannelId}' error while connecting to transport.");
 
-        private static readonly Action<ILogger, int, ConnectivityState, Exception?> _subchannelStateChanged =
-            LoggerMessage.Define<int, ConnectivityState>(LogLevel.Debug, new EventId(1, "SubchannelStateChanged"), "Subchannel id '{SubchannelId}' state changed to {State}.");
+        private static readonly Action<ILogger, int, ConnectivityState, string, Exception?> _subchannelStateChanged =
+            LoggerMessage.Define<int, ConnectivityState, string>(LogLevel.Debug, new EventId(11, "SubchannelStateChanged"), "Subchannel id '{SubchannelId}' state changed to {State}. Detail: '{Detail}'.");
 
-        public static void SubchannelCreated(ILogger logger, int subchannelId, IReadOnlyList<DnsEndPoint> addresses)
+        public static void SubchannelCreated(ILogger logger, int subchannelId, IReadOnlyList<BalancerAddress> addresses)
         {
             if (logger.IsEnabled(LogLevel.Debug))
             {
-                var addressesText = string.Join(", ", addresses.Select(a => a.Host + ":" + a.Port));
+                var addressesText = string.Join(", ", addresses.Select(a => a.EndPoint.Host + ":" + a.EndPoint.Port));
                 _subchannelCreated(logger, subchannelId, addressesText, null);
             }
         }
@@ -401,7 +409,7 @@ namespace Grpc.Net.Client.Balancer
             _addressesUpdatedWhileConnecting(logger, subchannelId, null);
         }
 
-        public static void ConnectedAddressNotInUpdatedAddresses(ILogger logger, int subchannelId, DnsEndPoint currentAddress)
+        public static void ConnectedAddressNotInUpdatedAddresses(ILogger logger, int subchannelId, BalancerAddress currentAddress)
         {
             _connectedAddressNotInUpdatedAddresses(logger, subchannelId, currentAddress, null);
         }
@@ -441,9 +449,9 @@ namespace Grpc.Net.Client.Balancer
             _connectError(logger, subchannelId, ex);
         }
 
-        public static void SubchannelStateChanged(ILogger logger, int subchannelId, ConnectivityState state)
+        public static void SubchannelStateChanged(ILogger logger, int subchannelId, ConnectivityState state, Status status)
         {
-            _subchannelStateChanged(logger, subchannelId, state, null);
+            _subchannelStateChanged(logger, subchannelId, state, status.Detail, status.DebugException);
         }
     }
 }

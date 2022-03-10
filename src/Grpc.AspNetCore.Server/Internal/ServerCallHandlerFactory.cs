@@ -16,8 +16,7 @@
 
 #endregion
 
-using System;
-using System.Threading.Tasks;
+using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server.Internal.CallHandlers;
 using Grpc.AspNetCore.Server.Model;
 using Grpc.Core;
@@ -32,7 +31,11 @@ namespace Grpc.AspNetCore.Server.Internal
     /// <summary>
     /// Creates server call handlers. Provides a place to get services that call handlers will use.
     /// </summary>
-    internal partial class ServerCallHandlerFactory<TService> where TService : class
+    internal partial class ServerCallHandlerFactory<
+#if NET5_0_OR_GREATER
+        [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
+#endif
+        TService> where TService : class
     {
         private readonly ILoggerFactory _loggerFactory;
         private readonly IGrpcServiceActivator<TService> _serviceActivator;
@@ -123,7 +126,7 @@ namespace Grpc.AspNetCore.Server.Internal
         }
 
         public bool IgnoreUnknownServices => _globalOptions.IgnoreUnknownServices ?? false;
-        public bool IgnoreUnknownMethods => _serviceOptions.IgnoreUnknownServices ?? _globalOptions.IgnoreUnknownServices  ?? false;
+        public bool IgnoreUnknownMethods => _serviceOptions.IgnoreUnknownServices ?? _globalOptions.IgnoreUnknownServices ?? false;
 
         public RequestDelegate CreateUnimplementedService()
         {

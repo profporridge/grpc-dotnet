@@ -16,14 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
 using System.Security.Cryptography.X509Certificates;
-using System.Threading;
-using System.Threading.Tasks;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -598,8 +591,8 @@ namespace Grpc.Shared.TestAssets
                 var responseHeaders = await call.ResponseHeadersAsync;
                 var responseTrailers = call.GetTrailers();
 
-                Assert.AreEqual("test_initial_metadata_value", responseHeaders.GetValue("x-grpc-test-echo-initial"));
-                CollectionAssert.AreEqual(new byte[] { 0xab, 0xab, 0xab }, responseTrailers.GetValueBytes("x-grpc-test-echo-trailing-bin"));
+                Assert.AreEqual("test_initial_metadata_value", responseHeaders.GetValue("x-grpc-test-echo-initial")!);
+                CollectionAssert.AreEqual(new byte[] { 0xab, 0xab, 0xab }, responseTrailers.GetValueBytes("x-grpc-test-echo-trailing-bin")!);
             }
 
             {
@@ -619,8 +612,8 @@ namespace Grpc.Shared.TestAssets
                 var responseHeaders = await call.ResponseHeadersAsync;
                 var responseTrailers = call.GetTrailers();
 
-                Assert.AreEqual("test_initial_metadata_value", responseHeaders.GetValue("x-grpc-test-echo-initial"));
-                CollectionAssert.AreEqual(new byte[] { 0xab, 0xab, 0xab }, responseTrailers.GetValueBytes("x-grpc-test-echo-trailing-bin"));
+                Assert.AreEqual("test_initial_metadata_value", responseHeaders.GetValue("x-grpc-test-echo-initial")!);
+                CollectionAssert.AreEqual(new byte[] { 0xab, 0xab, 0xab }, responseTrailers.GetValueBytes("x-grpc-test-echo-trailing-bin")!);
             }
         }
 
@@ -889,8 +882,8 @@ namespace Grpc.Shared.TestAssets
         // Consider providing ca file in a different format and removing method
         private byte[]? GetBytesFromPem(string pemString, string section)
         {
-            var header = string.Format("-----BEGIN {0}-----", section);
-            var footer = string.Format("-----END {0}-----", section);
+            var header = $"-----BEGIN {section}-----";
+            var footer = $"-----END {section}-----";
 
             var start = pemString.IndexOf(header, StringComparison.Ordinal);
             if (start == -1)

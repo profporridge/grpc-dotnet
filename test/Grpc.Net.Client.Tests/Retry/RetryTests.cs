@@ -16,22 +16,17 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
+using System.Globalization;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Internal.Http;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Tests.Shared;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using NUnit.Framework;
 
 namespace Grpc.Net.Client.Tests.Retry
@@ -103,6 +98,96 @@ namespace Grpc.Net.Client.Tests.Retry
         }
 
         [Test]
+        public async Task AsyncUnaryCall_AuthInteceptor_Success()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var services = new ServiceCollection();
+            services.AddLogging(b =>
+            {
+                b.AddProvider(new TestLoggerProvider(testSink));
+            });
+            services.AddNUnitLogger();
+            var provider = services.BuildServiceProvider();
+
+            var httpClient = ClientTestHelpers.CreateTestClient(async request =>
+            {
+                var reply = new HelloReply { Message = "Hello world" };
+                var streamContent = await ClientTestHelpers.CreateResponseContent(reply).DefaultTimeout();
+
+                return ResponseUtils.CreateResponse(HttpStatusCode.OK, streamContent);
+            });
+            var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
+            var credentialsSyncPoint = new SyncPoint(runContinuationsAsynchronously: true);
+            var credentials = CallCredentials.FromInterceptor(async (context, metadata) =>
+            {
+                await credentialsSyncPoint.WaitToContinue();
+                metadata.Add("Authorization", $"Bearer TEST");
+            });
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: provider.GetRequiredService<ILoggerFactory>(), serviceConfig: serviceConfig, configure: options => options.Credentials = ChannelCredentials.Create(new SslCredentials(), credentials));
+
+            // Act
+            var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "World" });
+
+            await credentialsSyncPoint.WaitForSyncPoint().DefaultTimeout();
+            credentialsSyncPoint.Continue();
+
+            // Assert
+            Assert.AreEqual("Hello world", (await call.ResponseAsync.DefaultTimeout()).Message);
+
+            var write = testSink.Writes.Single(w => w.EventId.Name == "CallCommited");
+            Assert.AreEqual("Call commited. Reason: ResponseHeadersReceived", write.State.ToString());
+        }
+
+        [Test]
+        public async Task AsyncUnaryCall_AuthInteceptorDispose_Error()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var services = new ServiceCollection();
+            services.AddLogging(b =>
+            {
+                b.AddProvider(new TestLoggerProvider(testSink));
+            });
+            services.AddNUnitLogger();
+            var provider = services.BuildServiceProvider();
+
+            var httpClient = ClientTestHelpers.CreateTestClient(async request =>
+            {
+                var reply = new HelloReply { Message = "Hello world" };
+                var streamContent = await ClientTestHelpers.CreateResponseContent(reply).DefaultTimeout();
+
+                return ResponseUtils.CreateResponse(HttpStatusCode.OK, streamContent);
+            });
+            var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
+            var credentialsSyncPoint = new SyncPoint(runContinuationsAsynchronously: true);
+            var credentials = CallCredentials.FromInterceptor(async (context, metadata) =>
+            {
+                await credentialsSyncPoint.WaitToContinue();
+                metadata.Add("Authorization", $"Bearer TEST");
+            });
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: provider.GetRequiredService<ILoggerFactory>(), serviceConfig: serviceConfig, configure: options => options.Credentials = ChannelCredentials.Create(new SslCredentials(), credentials));
+
+            // Act
+            var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "World" });
+            var responseTask = call.ResponseAsync;
+            var responseHeadersTask = call.ResponseHeadersAsync;
+
+            await credentialsSyncPoint.WaitForSyncPoint().DefaultTimeout();
+            call.Dispose();
+
+            // Assert
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => responseTask).DefaultTimeout();
+            Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
+
+            ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => responseHeadersTask).DefaultTimeout();
+            Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
+
+            var write = testSink.Writes.Single(w => w.EventId.Name == "CallCommited");
+            Assert.AreEqual("Call commited. Reason: Canceled", write.State.ToString());
+        }
+
+        [Test]
         public async Task AsyncUnaryCall_SuccessAfterRetry_AccessResponseHeaders_SuccessfullyResponseHeadersReturned()
         {
             // Arrange
@@ -124,7 +209,7 @@ namespace Grpc.Net.Client.Tests.Retry
                     return ResponseUtils.CreateHeadersOnlyResponse(
                         HttpStatusCode.OK,
                         StatusCode.Unavailable,
-                        customHeaders: new Dictionary<string, string> { ["call-count"] = callCount.ToString() });
+                        customHeaders: new Dictionary<string, string> { ["call-count"] = callCount.ToString(CultureInfo.InvariantCulture) });
                 }
 
                 syncPoint.Continue();
@@ -135,7 +220,7 @@ namespace Grpc.Net.Client.Tests.Retry
                 return ResponseUtils.CreateResponse(
                     HttpStatusCode.OK,
                     streamContent,
-                    customHeaders: new Dictionary<string, string> { ["call-count"] = callCount.ToString() });
+                    customHeaders: new Dictionary<string, string> { ["call-count"] = callCount.ToString(CultureInfo.InvariantCulture) });
             });
             var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
             var invoker = HttpClientCallInvokerFactory.Create(httpClient, serviceConfig: serviceConfig);
@@ -279,7 +364,7 @@ namespace Grpc.Net.Client.Tests.Retry
                 callCount++;
 
                 await request.Content!.CopyToAsync(new MemoryStream());
-                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.Unavailable, retryPushbackHeader: TimeSpan.FromSeconds(10).TotalMilliseconds.ToString());
+                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.Unavailable, retryPushbackHeader: TimeSpan.FromSeconds(10).TotalMilliseconds.ToString(CultureInfo.InvariantCulture));
             });
             var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
             var invoker = HttpClientCallInvokerFactory.Create(httpClient, serviceConfig: serviceConfig);
@@ -311,7 +396,7 @@ namespace Grpc.Net.Client.Tests.Retry
                 callCount++;
 
                 await request.Content!.CopyToAsync(new MemoryStream());
-                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.Unavailable, retryPushbackHeader: TimeSpan.FromSeconds(10).TotalMilliseconds.ToString());
+                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.Unavailable, retryPushbackHeader: TimeSpan.FromSeconds(10).TotalMilliseconds.ToString(CultureInfo.InvariantCulture));
             });
             var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
             var invoker = HttpClientCallInvokerFactory.Create(httpClient, serviceConfig: serviceConfig);
@@ -526,7 +611,7 @@ namespace Grpc.Net.Client.Tests.Retry
             {
                 Message = "Hello world 1"
             }).DefaultTimeout()).DefaultTimeout();
-            await streamContent.AddDataAndWait(new byte[0]);
+            await streamContent.AddDataAndWait(Array.Empty<byte>());
 
             var result = await resultTask.DefaultTimeout();
             Assert.AreEqual("Hello world 1", result.Message);
@@ -666,6 +751,110 @@ namespace Grpc.Net.Client.Tests.Retry
             Assert.AreEqual("2", requestMessage!.Name);
             requestMessage = await ReadRequestMessage(requestContent).DefaultTimeout();
             Assert.IsNull(requestMessage);
+        }
+
+        [Test]
+        public async Task AsyncUnaryCall_Success_SuccussCommitLogged()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var services = new ServiceCollection();
+            services.AddLogging(b =>
+            {
+                b.AddProvider(new TestLoggerProvider(testSink));
+            });
+            services.AddNUnitLogger();
+            var provider = services.BuildServiceProvider();
+
+            var httpClient = ClientTestHelpers.CreateTestClient(async request =>
+            {
+                var content = request.Content!;
+                await content.CopyToAsync(new MemoryStream());
+
+                var reply = new HelloReply { Message = "Hello world" };
+                var streamContent = await ClientTestHelpers.CreateResponseContent(reply).DefaultTimeout();
+
+                return ResponseUtils.CreateResponse(HttpStatusCode.OK, streamContent);
+            });
+            var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: provider.GetRequiredService<ILoggerFactory>(), serviceConfig: serviceConfig);
+
+            // Act
+            var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.GetServiceMethod(MethodType.Unary), string.Empty, new CallOptions(), new HelloRequest { Name = "World" });
+            await call.ResponseAsync.DefaultTimeout();
+
+            // Assert
+            var log = testSink.Writes.Single(w => w.EventId.Name == "CallCommited");
+            Assert.AreEqual("Call commited. Reason: ResponseHeadersReceived", log.State.ToString());
+        }
+
+        [Test]
+        public async Task AsyncUnaryCall_NoMessagesSuccess_Failure()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var services = new ServiceCollection();
+            services.AddLogging(b =>
+            {
+                b.AddProvider(new TestLoggerProvider(testSink));
+            });
+            services.AddNUnitLogger();
+            var provider = services.BuildServiceProvider();
+
+            var httpClient = ClientTestHelpers.CreateTestClient(async request =>
+            {
+                var content = request.Content!;
+                await content.CopyToAsync(new MemoryStream());
+
+                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.OK);
+            });
+            var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: provider.GetRequiredService<ILoggerFactory>(), serviceConfig: serviceConfig);
+
+            // Act
+            var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.GetServiceMethod(MethodType.Unary), string.Empty, new CallOptions(), new HelloRequest { Name = "World" });
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
+
+            // Assert
+            Assert.AreEqual("Failed to deserialize response message.", ex.Status.Detail);
+            Assert.AreEqual(StatusCode.Internal, ex.StatusCode);
+
+            var log = testSink.Writes.Single(w => w.EventId.Name == "CallCommited");
+            Assert.AreEqual("Call commited. Reason: FatalStatusCode", log.State.ToString());
+        }
+
+        [Test]
+        public async Task AsyncServerStreamingCall_NoMessagesSuccess_SuccussCommitLogged()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var services = new ServiceCollection();
+            services.AddLogging(b =>
+            {
+                b.AddProvider(new TestLoggerProvider(testSink));
+            });
+            services.AddNUnitLogger();
+            var provider = services.BuildServiceProvider();
+
+            var httpClient = ClientTestHelpers.CreateTestClient(async request =>
+            {
+                var content = request.Content!;
+                await content.CopyToAsync(new MemoryStream());
+
+                return ResponseUtils.CreateHeadersOnlyResponse(HttpStatusCode.OK, StatusCode.OK);
+            });
+            var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: provider.GetRequiredService<ILoggerFactory>(), serviceConfig: serviceConfig);
+
+            // Act
+            var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.GetServiceMethod(MethodType.ServerStreaming), string.Empty, new CallOptions(), new HelloRequest { Name = "World" });
+            var moveNextTask = call.ResponseStream.MoveNext(CancellationToken.None);
+
+            // Assert
+            Assert.IsFalse(await moveNextTask);
+
+            var log = testSink.Writes.Single(w => w.EventId.Name == "CallCommited");
+            Assert.AreEqual("Call commited. Reason: ResponseHeadersReceived", log.State.ToString());
         }
 
         [Test]

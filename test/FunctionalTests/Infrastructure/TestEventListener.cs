@@ -16,9 +16,8 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics.Tracing;
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 
 namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
@@ -32,18 +31,23 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
         private readonly List<ListenerSubscription> _subscriptions;
         private readonly ILogger _logger;
         private readonly int _eventId;
+        private readonly EventSource _eventSource;
 
-        public TestEventListener(int eventId, ILoggerFactory loggerFactory)
+        public TestEventListener(int eventId, ILoggerFactory loggerFactory, EventSource eventSource)
         {
             _eventId = eventId;
+            _eventSource = eventSource;
             _subscriptions = new List<ListenerSubscription>();
             _logger = loggerFactory.CreateLogger<TestEventListener>();
         }
 
-        public EventWrittenEventArgs? EventData { get; private set; }
-
         protected override void OnEventWritten(EventWrittenEventArgs eventData)
         {
+            if (eventData.EventSource != _eventSource)
+            {
+                return;
+            }
+
             // Subscriptions change on multiple threads so make a local copy
             ListenerSubscription[]? subscriptions = null;
             lock (_lock)
@@ -68,10 +72,10 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
                 {
                     foreach (var subscription in subscriptions)
                     {
-                        if (subscription.CounterName == Convert.ToString(name))
+                        if (subscription.CounterName == Convert.ToString(name, CultureInfo.InvariantCulture))
                         {
                             subscription.CheckCount++;
-                            var currentValue = Convert.ToInt64(value);
+                            var currentValue = Convert.ToInt64(value, CultureInfo.InvariantCulture);
 
                             if (subscription.ExpectedValue == currentValue)
                             {

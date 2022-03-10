@@ -16,9 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.Core;
 using Grpc.Shared;
@@ -31,7 +29,11 @@ using Log = Grpc.AspNetCore.Server.Model.Internal.ServiceRouteBuilderLog;
 
 namespace Grpc.AspNetCore.Server.Model.Internal
 {
-    internal class ServiceRouteBuilder<TService> where TService : class
+    internal class ServiceRouteBuilder<
+#if NET5_0_OR_GREATER
+        [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
+#endif
+        TService> where TService : class
     {
         private readonly IEnumerable<IServiceMethodProvider<TService>> _serviceMethodProviders;
         private readonly ServerCallHandlerFactory<TService> _serverCallHandlerFactory;
@@ -138,10 +140,8 @@ namespace Grpc.AspNetCore.Server.Model.Internal
 
         private static IEndpointConventionBuilder CreateUnimplementedEndpoint(IEndpointRouteBuilder endpointRouteBuilder, string pattern, string displayName, RequestDelegate requestDelegate)
         {
-#pragma warning disable CS8625 // Cannot convert null literal to non-nullable reference type.
             // https://github.com/dotnet/aspnetcore/issues/24042
             var routePattern = RoutePatternFactory.Parse(pattern, defaults: null, new { contentType = GrpcUnimplementedConstraint.Instance });
-#pragma warning restore CS8625 // Cannot convert null literal to non-nullable reference type.
             var endpointBuilder = endpointRouteBuilder.Map(routePattern, requestDelegate);
 
             endpointBuilder.Add(ep =>

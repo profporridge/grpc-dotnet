@@ -16,18 +16,10 @@
 
 #endregion
 
-using System;
-using System.IO;
 using System.Reflection;
-using System.Security.Cryptography.X509Certificates;
 using Common;
-using Microsoft.AspNetCore;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 
 namespace GrpcAspNetCoreServer
 {
@@ -124,6 +116,9 @@ namespace GrpcAspNetCoreServer
 
         private static void ConfigureListenOptions(ListenOptions listenOptions, IConfigurationRoot config, System.Net.IPEndPoint endPoint)
         {
+            var basePath = Path.GetDirectoryName(typeof(Program).Assembly.Location);
+            var certPath = Path.Combine(basePath!, "Certs", "server1.pfx");
+
             var protocol = config["protocol"] ?? "";
             bool.TryParse(config["enableCertAuth"], out var enableCertAuth);
 
@@ -134,7 +129,7 @@ namespace GrpcAspNetCoreServer
             {
                 listenOptions.Protocols = HttpProtocols.Http1AndHttp2;
 
-                listenOptions.UseHttps(httpsOptions =>
+                listenOptions.UseHttps(certPath, "1111", httpsOptions =>
                 {
                     if (enableCertAuth)
                     {
@@ -143,12 +138,12 @@ namespace GrpcAspNetCoreServer
                     }
                 });
             }
-#if NET6_0
+#if NET6_0_OR_GREATER
             else if (protocol.Equals("h3", StringComparison.OrdinalIgnoreCase))
             {
                 listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
 
-                listenOptions.UseHttps(httpsOptions =>
+                listenOptions.UseHttps(certPath, "1111", httpsOptions =>
                 {
                     if (enableCertAuth)
                     {

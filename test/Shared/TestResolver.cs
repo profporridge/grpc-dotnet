@@ -25,23 +25,32 @@ using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client.Balancer;
 using Grpc.Net.Client.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Grpc.Tests.Shared
 {
-    internal class TestResolver : Resolver
+    internal class TestResolver : PollingResolver
     {
         private readonly Func<Task>? _onRefreshAsync;
+        private readonly TaskCompletionSource<object?> _hasResolvedTcs;
         private ResolverResult? _result;
-        private Action<ResolverResult>? _listener;
 
-        public TestResolver(Func<Task>? onRefreshAsync = null)
+        public Task HasResolvedTask => _hasResolvedTcs.Task;
+
+        public TestResolver(ILoggerFactory loggerFactory) : this(loggerFactory, null)
         {
-            _onRefreshAsync = onRefreshAsync;
         }
 
-        public void UpdateEndPoints(List<DnsEndPoint> endPoints, ServiceConfig? serviceConfig = null)
+        public TestResolver(ILoggerFactory? loggerFactory = null, Func<Task>? onRefreshAsync = null) : base(loggerFactory ?? NullLoggerFactory.Instance)
         {
-            UpdateResult(ResolverResult.ForResult(endPoints, serviceConfig));
+            _onRefreshAsync = onRefreshAsync;
+            _hasResolvedTcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public void UpdateAddresses(List<BalancerAddress> addresses, ServiceConfig? serviceConfig = null, Status? serviceConfigStatus = null)
+        {
+            UpdateResult(ResolverResult.ForResult(addresses, serviceConfig, serviceConfigStatus));
         }
 
         public void UpdateError(Status status)
@@ -52,23 +61,18 @@ namespace Grpc.Tests.Shared
         public void UpdateResult(ResolverResult result)
         {
             _result = result;
-            _listener?.Invoke(result);
+            Listener?.Invoke(result);
         }
 
-        protected override void Dispose(bool disposing)
+        protected override async Task ResolveAsync(CancellationToken cancellationToken)
         {
-            _listener = null;
-        }
+            if (_onRefreshAsync != null)
+            {
+                await _onRefreshAsync();
+            }
 
-        public override Task RefreshAsync(CancellationToken cancellationToken)
-        {
-            _listener?.Invoke(_result ?? ResolverResult.ForResult(Array.Empty<DnsEndPoint>(), serviceConfig: null));
-            return _onRefreshAsync?.Invoke() ?? Task.CompletedTask;
-        }
-
-        public override void Start(Action<ResolverResult> listener)
-        {
-            _listener = listener;
+            Listener(_result ?? ResolverResult.ForResult(Array.Empty<BalancerAddress>(), serviceConfig: null, serviceConfigStatus: null));
+            _hasResolvedTcs.TrySetResult(null);
         }
     }
 }

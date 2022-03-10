@@ -16,12 +16,8 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Globalization;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
@@ -236,7 +232,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
 
                 return Task.FromException<DataMessage>(new RpcException(new Status(StatusCode.DeadlineExceeded, ""), new Metadata
                 {
-                    new Metadata.Entry(GrpcProtocolConstants.RetryPushbackHeader, TimeSpan.FromSeconds(10).TotalMilliseconds.ToString())
+                    new Metadata.Entry(GrpcProtocolConstants.RetryPushbackHeader, TimeSpan.FromSeconds(10).TotalMilliseconds.ToString(CultureInfo.InvariantCulture))
                 }));
             }
 
@@ -274,7 +270,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
 
                 return Task.FromException(new RpcException(new Status(StatusCode.DeadlineExceeded, ""), new Metadata
                 {
-                    new Metadata.Entry(GrpcProtocolConstants.RetryPushbackHeader, TimeSpan.FromSeconds(10).TotalMilliseconds.ToString())
+                    new Metadata.Entry(GrpcProtocolConstants.RetryPushbackHeader, TimeSpan.FromSeconds(10).TotalMilliseconds.ToString(CultureInfo.InvariantCulture))
                 }));
             }
 
@@ -289,7 +285,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             var client = TestClientFactory.Create(channel, method);
 
             // Act
-            var call = client.DuplexStreamingCall(new CallOptions(deadline: DateTime.UtcNow.AddMilliseconds(300)));
+            var deadlineTimeout = 500;
+            var call = client.DuplexStreamingCall(new CallOptions(deadline: DateTime.UtcNow.AddMilliseconds(deadlineTimeout)));
 
             // Assert
             var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseStream.MoveNext(CancellationToken.None)).DefaultTimeout();

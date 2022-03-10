@@ -25,7 +25,6 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Grpc.Core;
-using Grpc.Net.Client.Balancer.Internal;
 using Grpc.Net.Client.Configuration;
 using Grpc.Net.Client.Internal;
 using Grpc.Shared;
@@ -33,23 +32,25 @@ using Microsoft.Extensions.Logging;
 
 namespace Grpc.Net.Client.Balancer.Internal
 {
-    internal class ConnectionManager : IDisposable, IChannelControlHelper
+    internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
     {
+        private static readonly ServiceConfig DefaultServiceConfig = new ServiceConfig();
+
         private readonly SemaphoreSlim _nextPickerLock;
         private readonly object _lock;
         internal readonly Resolver _resolver;
         private readonly ISubchannelTransportFactory _subchannelTransportFactory;
         private readonly List<Subchannel> _subchannels;
         private readonly List<StateWatcher> _stateWatchers;
-        private readonly CancellationTokenSource _cts;
+        private readonly TaskCompletionSource<object?> _resolverStartedTcs;
 
         // Internal for testing
         internal LoadBalancer? _balancer;
         internal SubchannelPicker? _picker;
-        private Task? _resolverRefreshTask;
-        private Task? _resolveTask;
+        private bool _resolverStarted;
         private TaskCompletionSource<SubchannelPicker> _nextPickerTcs;
         private int _currentSubchannelId;
+        private ServiceConfig? _previousServiceConfig;
 
         internal ConnectionManager(
             Resolver resolver,
@@ -61,9 +62,9 @@ namespace Grpc.Net.Client.Balancer.Internal
             _lock = new object();
             _nextPickerLock = new SemaphoreSlim(1);
             _nextPickerTcs = new TaskCompletionSource<SubchannelPicker>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _cts = new CancellationTokenSource();
+            _resolverStartedTcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            Logger = loggerFactory.CreateLogger(GetType());
+            Logger = loggerFactory.CreateLogger<ConnectionManager>();
             LoggerFactory = loggerFactory;
 
             _subchannels = new List<Subchannel>();
@@ -114,31 +115,7 @@ namespace Grpc.Net.Client.Balancer.Internal
 
         void IChannelControlHelper.RefreshResolver()
         {
-            lock (_lock)
-            {
-                ConnectionManagerLog.ResolverRefreshRequested(Logger);
-
-                if (_resolveTask == null || !_resolveTask.IsCompleted)
-                {
-                    _resolveTask = ResolveNowAsync(_cts.Token);
-                }
-                else
-                {
-                    ConnectionManagerLog.ResolverRefreshIgnored(Logger);
-                }
-            }
-        }
-
-        private async Task ResolveNowAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                await _resolver.RefreshAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                ConnectionManagerLog.ResolverRefreshError(Logger, ex);
-            }
+            _resolver.Refresh();
         }
 
         private void OnResolverResult(ResolverResult result)
@@ -148,30 +125,65 @@ namespace Grpc.Net.Client.Balancer.Internal
                 throw new InvalidOperationException($"Load balancer not configured.");
             }
 
+            var channelStatus = result.Status;
+
             // https://github.com/grpc/proposal/blob/master/A21-service-config-error-handling.md
-            // 1. Only use resolved service config if not disabled.
-            // 2. Only use resolved service config if valid. This includes having a factory for one of the load balancing configs.
+            // Additionally, only use resolved service config if not disabled.
             LoadBalancingConfig? loadBalancingConfig = null;
-            if (result.ServiceConfig != null)
+            if (!DisableResolverServiceConfig)
             {
-                if (!DisableResolverServiceConfig)
+                ServiceConfig? workingServiceConfig = null;
+                if (result.ServiceConfig == null)
                 {
-                    if (result.ServiceConfig.LoadBalancingConfigs.Count > 0)
+                    // Step 4 and 5
+                    if (result.ServiceConfigStatus == null)
                     {
-                        if (!ChildHandlerLoadBalancer.TryGetValidServiceConfigFactory(result.ServiceConfig.LoadBalancingConfigs, LoadBalancerFactories, out loadBalancingConfig, out var _))
+                        // Step 5: Use default service config if none is provided.
+                        _previousServiceConfig = DefaultServiceConfig;
+                        workingServiceConfig = DefaultServiceConfig;
+                    }
+                    else
+                    {
+                        // Step 4
+                        if (_previousServiceConfig == null)
                         {
-                            ConnectionManagerLog.ResolverUnsupportedLoadBalancingConfig(Logger, result.ServiceConfig.LoadBalancingConfigs);
+                            // Step 4.ii: If no config was provided or set previously, then treat resolution as a failure.
+                            channelStatus = result.ServiceConfigStatus.GetValueOrDefault();
+                        }
+                        else
+                        {
+                            // Step 4.i: Continue using previous service config if it was set and a new one is not provided.
+                            workingServiceConfig = _previousServiceConfig;
+                            ConnectionManagerLog.ResolverServiceConfigFallback(Logger, result.ServiceConfigStatus.GetValueOrDefault());
                         }
                     }
                 }
                 else
+                {
+                    // Step 3: Use provided service config if it is set.
+                    workingServiceConfig = result.ServiceConfig;
+                    _previousServiceConfig = result.ServiceConfig;
+                }
+
+
+                if (workingServiceConfig?.LoadBalancingConfigs.Count > 0)
+                {
+                    if (!ChildHandlerLoadBalancer.TryGetValidServiceConfigFactory(workingServiceConfig.LoadBalancingConfigs, LoadBalancerFactories, out loadBalancingConfig, out var _))
+                    {
+                        ConnectionManagerLog.ResolverUnsupportedLoadBalancingConfig(Logger, workingServiceConfig.LoadBalancingConfigs);
+                    }
+                }
+            }
+            else
+            {
+                if (result.ServiceConfig != null)
                 {
                     ConnectionManagerLog.ResolverServiceConfigNotUsed(Logger);
                 }
             }
 
             var state = new ChannelState(
-                result.Status,
+                channelStatus,
                 result.Addresses,
                 loadBalancingConfig,
                 BalancerAttributes.Empty);
@@ -179,12 +191,12 @@ namespace Grpc.Net.Client.Balancer.Internal
             lock (_lock)
             {
                 _balancer.UpdateChannelState(state);
+                _resolverStartedTcs.TrySetResult(null);
             }
         }
 
         public void Dispose()
         {
-            _cts.Cancel();
             _resolver.Dispose();
             _nextPickerLock.Dispose();
             lock (_lock)
@@ -241,19 +253,21 @@ namespace Grpc.Net.Client.Balancer.Internal
         {
             // Ensure that the resolver has started and has resolved at least once.
             // This ensures an inner load balancer has been created and is running.
-            if (_resolverRefreshTask == null)
+            if (!_resolverStarted)
             {
                 lock (_lock)
                 {
-                    if (_resolverRefreshTask == null)
+                    if (!_resolverStarted)
                     {
                         _resolver.Start(OnResolverResult);
-                        _resolverRefreshTask = _resolver.RefreshAsync(_cts.Token);
+                        _resolver.Refresh();
+
+                        _resolverStarted = true;
                     }
                 }
             }
 
-            return _resolverRefreshTask;
+            return _resolverStartedTcs.Task;
         }
 
         public void UpdateState(BalancerState state)
@@ -288,13 +302,7 @@ namespace Grpc.Net.Client.Balancer.Internal
             }
         }
 
-        public async
-#if !NETSTANDARD2_0
-            ValueTask<(Subchannel Subchannel, DnsEndPoint Address, Action<CompletionContext> OnComplete)>
-#else
-            Task<(Subchannel Subchannel, DnsEndPoint Address, Action<CompleteContext> OnComplete)>
-#endif
-            PickAsync(PickContext context, bool waitForReady, CancellationToken cancellationToken)
+        public async ValueTask<(Subchannel Subchannel, BalancerAddress Address, ISubchannelCallTracker? SubchannelCallTracker)> PickAsync(PickContext context, bool waitForReady, CancellationToken cancellationToken)
         {
             SubchannelPicker? previousPicker = null;
 
@@ -317,7 +325,7 @@ namespace Grpc.Net.Client.Balancer.Internal
                         if (address != null)
                         {
                             ConnectionManagerLog.PickResultSuccessful(Logger, subchannel.Id, address);
-                            return (subchannel, address, result.Complete);
+                            return (subchannel, address, result.SubchannelCallTracker);
                         }
                         else
                         {
@@ -443,90 +451,70 @@ namespace Grpc.Net.Client.Balancer.Internal
                 }
             }
 
-            return WaitForStateChangedAsyncCore(watcher, cancellationToken);
+            return WaitForStateChangedAsyncCore(watcher);
         }
 
-        private async Task WaitForStateChangedAsyncCore(StateWatcher watcher, CancellationToken cancellationToken)
+        private async Task WaitForStateChangedAsyncCore(StateWatcher watcher)
         {
-            using (cancellationToken.Register(OnCancellation, watcher))
+            using (watcher.CancellationToken.Register(OnCancellation, watcher))
             {
                 await watcher.Tcs.Task.ConfigureAwait(false);
             }
+        }
 
-            void OnCancellation(object? s)
+        private void OnCancellation(object? s)
+        {
+            lock (_lock)
             {
-                lock (_lock)
+                StateWatcher watcher = (StateWatcher)s!;
+                if (_stateWatchers.Remove(watcher))
                 {
-                    StateWatcher watcher = (StateWatcher)s!;
-                    if (_stateWatchers.Remove(watcher))
-                    {
-                        watcher.Tcs.SetCanceled();
-                    }
+                    watcher.Tcs.SetCanceled(watcher.CancellationToken);
                 }
             }
         }
 
+        // Don't use a record struct here. This type is cast to object and a struct will box.
         private record StateWatcher(CancellationToken CancellationToken, ConnectivityState? WaitForState, TaskCompletionSource<object?> Tcs);
     }
 
     internal static class ConnectionManagerLog
     {
-        private static readonly Action<ILogger, Exception?> _resolverRefreshRequested =
-            LoggerMessage.Define(LogLevel.Trace, new EventId(1, "ResolverRefreshRequested"), "Resolver refresh requested.");
-
-        private static readonly Action<ILogger, Exception?> _resolverRefreshIgnored =
-            LoggerMessage.Define(LogLevel.Trace, new EventId(1, "ResolverRefreshIgnored"), "Resolver refresh ignored because resolve is already in progress.");
-
-        private static readonly Action<ILogger, Exception?> _resolverRefreshError =
-            LoggerMessage.Define(LogLevel.Error, new EventId(1, "ResolverRefreshError"), "Error refreshing resolver.");
-
         private static readonly Action<ILogger, string, Exception?> _resolverUnsupportedLoadBalancingConfig =
             LoggerMessage.Define<string>(LogLevel.Warning, new EventId(1, "ResolverUnsupportedLoadBalancingConfig"), "Service config returned by the resolver contains unsupported load balancer policies: {LoadBalancingConfigs}. Load balancer unchanged.");
 
         private static readonly Action<ILogger, Exception?> _resolverServiceConfigNotUsed =
-            LoggerMessage.Define(LogLevel.Debug, new EventId(1, "ResolverServiceConfigNotUsed"), "Service config returned by the resolver not used.");
+            LoggerMessage.Define(LogLevel.Debug, new EventId(2, "ResolverServiceConfigNotUsed"), "Service config returned by the resolver not used.");
 
         private static readonly Action<ILogger, ConnectivityState, Exception?> _channelStateUpdated =
-            LoggerMessage.Define<ConnectivityState>(LogLevel.Debug, new EventId(1, "ChannelStateUpdated"), "Channel state updated to {State}.");
+            LoggerMessage.Define<ConnectivityState>(LogLevel.Debug, new EventId(3, "ChannelStateUpdated"), "Channel state updated to {State}.");
 
         private static readonly Action<ILogger, Exception?> _channelPickerUpdated =
-            LoggerMessage.Define(LogLevel.Debug, new EventId(1, "ChannelPickerUpdated"), "Channel picker updated.");
+            LoggerMessage.Define(LogLevel.Debug, new EventId(4, "ChannelPickerUpdated"), "Channel picker updated.");
 
         private static readonly Action<ILogger, Exception?> _pickStarted =
-            LoggerMessage.Define(LogLevel.Trace, new EventId(1, "PickStarted"), "Pick started.");
+            LoggerMessage.Define(LogLevel.Trace, new EventId(5, "PickStarted"), "Pick started.");
 
-        private static readonly Action<ILogger, int, DnsEndPoint, Exception?> _pickResultSuccessful =
-            LoggerMessage.Define<int, DnsEndPoint>(LogLevel.Debug, new EventId(1, "PickResultSuccessful"), "Successfully picked subchannel id '{SubchannelId}' with address {CurrentAddress}.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _pickResultSuccessful =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Debug, new EventId(6, "PickResultSuccessful"), "Successfully picked subchannel id '{SubchannelId}' with address {CurrentAddress}.");
 
         private static readonly Action<ILogger, int, Exception?> _pickResultSubchannelNoCurrentAddress =
-            LoggerMessage.Define<int>(LogLevel.Debug, new EventId(1, "PickResultSubchannelNoCurrentAddress"), "Picked subchannel id '{SubchannelId}' doesn't have a current address.");
+            LoggerMessage.Define<int>(LogLevel.Debug, new EventId(7, "PickResultSubchannelNoCurrentAddress"), "Picked subchannel id '{SubchannelId}' doesn't have a current address.");
 
         private static readonly Action<ILogger, Exception?> _pickResultQueued =
-            LoggerMessage.Define(LogLevel.Debug, new EventId(1, "PickResultQueued"), "Picked queued.");
+            LoggerMessage.Define(LogLevel.Debug, new EventId(8, "PickResultQueued"), "Picked queued.");
 
         private static readonly Action<ILogger, Status, Exception?> _pickResultFailure =
-            LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(1, "PickResultFailure"), "Picked failure with status: {Status}");
+            LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(9, "PickResultFailure"), "Picked failure with status: {Status}");
 
         private static readonly Action<ILogger, Status, Exception?> _pickResultFailureWithWaitForReady =
-            LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(1, "PickResultFailureWithWaitForReady"), "Picked failure with status: {Status}. Retrying because wait for ready is enabled.");
+            LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(10, "PickResultFailureWithWaitForReady"), "Picked failure with status: {Status}. Retrying because wait for ready is enabled.");
 
         private static readonly Action<ILogger, Exception?> _pickWaiting =
-            LoggerMessage.Define(LogLevel.Trace, new EventId(1, "PickWaiting"), "Waiting for a new picker.");
+            LoggerMessage.Define(LogLevel.Trace, new EventId(11, "PickWaiting"), "Waiting for a new picker.");
 
-        public static void ResolverRefreshRequested(ILogger logger)
-        {
-            _resolverRefreshRequested(logger, null);
-        }
-
-        public static void ResolverRefreshIgnored(ILogger logger)
-        {
-            _resolverRefreshIgnored(logger, null);
-        }
-
-        public static void ResolverRefreshError(ILogger logger, Exception ex)
-        {
-            _resolverRefreshError(logger, ex);
-        }
+        private static readonly Action<ILogger, Status, Exception?> _resolverServiceConfigFallback =
+            LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(12, "ResolverServiceConfigFallback"), "Falling back to previously loaded service config. Resolver failure when retreiving or parsing service config with status: {Status}");
 
         public static void ResolverUnsupportedLoadBalancingConfig(ILogger logger, IList<LoadBalancingConfig> loadBalancingConfigs)
         {
@@ -557,7 +545,7 @@ namespace Grpc.Net.Client.Balancer.Internal
             _pickStarted(logger, null);
         }
 
-        public static void PickResultSuccessful(ILogger logger, int subchannelId, DnsEndPoint currentAddress)
+        public static void PickResultSuccessful(ILogger logger, int subchannelId, BalancerAddress currentAddress)
         {
             _pickResultSuccessful(logger, subchannelId, currentAddress, null);
         }
@@ -585,6 +573,11 @@ namespace Grpc.Net.Client.Balancer.Internal
         public static void PickWaiting(ILogger logger)
         {
             _pickWaiting(logger, null);
+        }
+
+        public static void ResolverServiceConfigFallback(ILogger logger, Status status)
+        {
+            _resolverServiceConfigFallback(logger, status, null);
         }
     }
 }

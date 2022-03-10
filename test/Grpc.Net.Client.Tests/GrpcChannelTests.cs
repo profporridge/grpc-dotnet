@@ -16,21 +16,15 @@
 
 #endregion
 
-using System;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
-using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Net.Client.Configuration;
+using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Tests.Shared;
-using NUnit.Framework;
-using Microsoft.Extensions.Logging.Testing;
-using System.Linq;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
-using System.IO;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
+using NUnit.Framework;
 #if SUPPORT_LOAD_BALANCING
 using Grpc.Net.Client.Balancer;
 using Grpc.Net.Client.Balancer.Internal;
@@ -191,7 +185,7 @@ namespace Grpc.Net.Client.Tests
             var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () => await client.SayHelloAsync(new HelloRequest()));
 
             // Assert
-            Assert.AreEqual("HttpClient", ex.Status.DebugException.Message);
+            Assert.AreEqual("HttpClient", ex.Status.DebugException!.Message);
         }
 
         [Test]
@@ -206,10 +200,10 @@ namespace Grpc.Net.Client.Tests
             var client = new Greeter.GreeterClient(channel);
 
             // Act
-            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () => await client.SayHelloAsync(new HelloRequest()));
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () => await client.SayHelloAsync(new HelloRequest())).DefaultTimeout();
 
             // Assert
-            Assert.AreEqual("HttpHandler", ex.Status.DebugException.Message);
+            Assert.AreEqual("HttpHandler", ex.Status.DebugException!.Message);
         }
 
 #if NET472
@@ -686,7 +680,7 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual(ConnectivityState.Shutdown, channel.State);
         }
 
-        private async Task WaitForStateAsync(GrpcChannel channel, ConnectivityState state)
+        private static async Task WaitForStateAsync(GrpcChannel channel, ConnectivityState state)
         {
             while (true)
             {
@@ -797,22 +791,51 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual("No address resolver configured for the scheme 'test'.", ex.Message);
         }
 
+        [TestCase(false, 80)]
+        [TestCase(true, 443)]
+        public void Resolver_DefaultPort_MatchesSecure(bool isSecure, int expectedPort)
+        {
+            // Arrange
+            var services = new ServiceCollection();
+            services.AddSingleton<ResolverFactory, ChannelTestResolverFactory>();
+            services.AddSingleton<ISubchannelTransportFactory, TestSubchannelTransportFactory>();
+
+            var handler = new TestHttpMessageHandler();
+            var channelOptions = new GrpcChannelOptions
+            {
+                Credentials = isSecure ? ChannelCredentials.SecureSsl : ChannelCredentials.Insecure,
+                ServiceProvider = services.BuildServiceProvider(),
+                HttpHandler = handler
+            };
+
+            // Act
+            var channel = GrpcChannel.ForAddress("test:///localhost", channelOptions);
+
+            // Assert
+            Assert.IsInstanceOf(typeof(ChannelTestResolver), channel.ConnectionManager._resolver);
+
+            var resolver = (ChannelTestResolver)channel.ConnectionManager._resolver;
+            Assert.AreEqual(expectedPort, resolver.Options.DefaultPort);
+        }
+
         public class ChannelTestResolverFactory : ResolverFactory
         {
             public override string Name => "test";
 
             public override Resolver Create(ResolverOptions options)
             {
-                return new ChannelTestResolver();
+                return new ChannelTestResolver(options);
             }
         }
 
         public class ChannelTestResolver : Resolver
         {
-            public override Task RefreshAsync(CancellationToken cancellationToken)
+            public ChannelTestResolver(ResolverOptions options)
             {
-                throw new NotImplementedException();
+                Options = options;
             }
+
+            public ResolverOptions Options { get; }
 
             public override void Start(Action<ResolverResult> listener)
             {

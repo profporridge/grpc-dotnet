@@ -16,10 +16,8 @@
 
 #endregion
 
-using System;
 using System.Diagnostics;
-using System.Linq;
-using System.Threading.Tasks;
+using System.Globalization;
 using Grpc.Core;
 using Race;
 
@@ -29,7 +27,7 @@ namespace FunctionalTestsWebsite.Services
     {
         public override async Task ReadySetGo(IAsyncStreamReader<RaceMessage> requestStream, IServerStreamWriter<RaceMessage> responseStream, ServerCallContext context)
         {
-            var raceDuration = TimeSpan.Parse(context.RequestHeaders.GetValue("race-duration"));
+            var raceDuration = TimeSpan.Parse(context.RequestHeaders.GetValue("race-duration")!, CultureInfo.InvariantCulture);
 
             // Read incoming messages in a background task
             RaceMessage? lastMessageReceived = null;

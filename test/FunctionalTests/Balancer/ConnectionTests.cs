@@ -22,6 +22,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Security.Authentication;
 using System.Threading;
 using System.Threading.Tasks;
 using Greet;
@@ -75,8 +76,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             var services = new ServiceCollection();
             services.AddSingleton<ResolverFactory>(new StaticResolverFactory(_ => new[]
             {
-                new DnsEndPoint(endpoint1.Address.Host, endpoint1.Address.Port),
-                new DnsEndPoint(endpoint2.Address.Host, endpoint2.Address.Port)
+                new BalancerAddress(endpoint1.Address.Host, endpoint1.Address.Port),
+                new BalancerAddress(endpoint2.Address.Host, endpoint2.Address.Port)
             }));
 
             var socketsHttpHandler = new SocketsHttpHandler
@@ -110,15 +111,19 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             var balancer = BalancerHelpers.GetInnerLoadBalancer<PickFirstBalancer>(channel)!;
             var subchannel = balancer._subchannel!;
             var transport = (SocketConnectivitySubchannelTransport)subchannel.Transport;
-            var activeStreams = transport._activeStreams;
+            var activeStreams = transport.GetActiveStreams();
 
             // Assert
             Assert.AreEqual(HttpHandlerType.SocketsHttpHandler, channel.HttpHandlerType);
 
-            await TestHelpers.AssertIsTrueRetryAsync(() => activeStreams.Count == 10, "Wait for connections to start.");
+            await TestHelpers.AssertIsTrueRetryAsync(() =>
+            {
+                activeStreams = transport.GetActiveStreams();
+                return activeStreams.Count == 10;
+            }, "Wait for connections to start.");
             foreach (var t in activeStreams)
             {
-                Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), t.EndPoint);
+                Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), t.Address.EndPoint);
             }
 
             // Act
@@ -134,8 +139,12 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             Logger.LogInformation($"Done sending gRPC calls");
 
             // Assert
-            await TestHelpers.AssertIsTrueRetryAsync(() => activeStreams.Count == 11, "Wait for connections to start.");
-            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), activeStreams.Last().EndPoint);
+            await TestHelpers.AssertIsTrueRetryAsync(() =>
+            {
+                activeStreams = transport.GetActiveStreams();
+                return activeStreams.Count == 11;
+            }, "Wait for connections to start.");
+            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50051), activeStreams[activeStreams.Count - 1].Address.EndPoint);
 
             tcs.SetResult(null);
 
@@ -149,7 +158,11 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
 
             // There are still be 10 HTTP/1.1 connections because they aren't immediately removed
             // when the server is shutdown and connectivity is lost.
-            await TestHelpers.AssertIsTrueRetryAsync(() => activeStreams.Count == 10, "Wait for HTTP/2 connection to end.");
+            await TestHelpers.AssertIsTrueRetryAsync(() =>
+            {
+                activeStreams = transport.GetActiveStreams();
+                return activeStreams.Count == 10;
+            }, "Wait for HTTP/2 connection to end.");
 
             grpcWebHandler.HttpVersion = new Version(1, 1);
 
@@ -160,6 +173,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             Assert.AreEqual(StatusCode.Unavailable, ex.StatusCode);
 
             // Removed by failed call.
+            activeStreams = transport.GetActiveStreams();
             Assert.AreEqual(0, activeStreams.Count);
             Assert.AreEqual(ConnectivityState.Idle, channel.State);
 
@@ -168,8 +182,60 @@ namespace Grpc.AspNetCore.FunctionalTests.Balancer
             Assert.AreEqual("Balancer", reply.Message);
             Assert.AreEqual("127.0.0.1:50052", host);
 
+            activeStreams = transport.GetActiveStreams();
             Assert.AreEqual(1, activeStreams.Count);
-            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50052), activeStreams[0].EndPoint);
+            Assert.AreEqual(new DnsEndPoint("127.0.0.1", 50052), activeStreams[0].Address.EndPoint);
+        }
+
+        [Test]
+        public async Task Client_CallCredentials_WithLoadBalancing_RoundtripToken()
+        {
+            // Arrange
+            string? authorization = null;
+            Task<HelloReply> UnaryMethod(HelloRequest request, ServerCallContext context)
+            {
+                authorization = context.RequestHeaders.GetValue("authorization");
+                return Task.FromResult(new HelloReply { Message = request.Name });
+            }
+            var credentials = CallCredentials.FromInterceptor((context, metadata) =>
+            {
+                metadata.Add("Authorization", $"Bearer TEST");
+                return Task.CompletedTask;
+            });
+            using var endpoint1 = BalancerHelpers.CreateGrpcEndpoint<HelloRequest, HelloReply>(50051, UnaryMethod, nameof(UnaryMethod), HttpProtocols.Http1AndHttp2, isHttps: true);
+            using var endpoint2 = BalancerHelpers.CreateGrpcEndpoint<HelloRequest, HelloReply>(50052, UnaryMethod, nameof(UnaryMethod), HttpProtocols.Http1AndHttp2, isHttps: true);
+
+            var services = new ServiceCollection();
+            services.AddSingleton<ResolverFactory>(new StaticResolverFactory(_ => new[]
+            {
+                new BalancerAddress(endpoint1.Address.Host, endpoint1.Address.Port),
+                new BalancerAddress(endpoint2.Address.Host, endpoint2.Address.Port)
+            }));
+            var socketsHttpHandler = new SocketsHttpHandler
+            {
+                EnableMultipleHttp2Connections = true,
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    EnabledSslProtocols = SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12,
+                    RemoteCertificateValidationCallback = (_, __, ___, ____) => true
+                }
+            };
+            var channel = GrpcChannel.ForAddress("static:///localhost", new GrpcChannelOptions
+            {
+                LoggerFactory = LoggerFactory,
+                ServiceProvider = services.BuildServiceProvider(),
+                Credentials = ChannelCredentials.Create(new SslCredentials(), credentials),
+                HttpHandler = socketsHttpHandler
+            });
+
+            var client = TestClientFactory.Create(channel, endpoint1.Method);
+
+            // Act
+            var reply = await client.UnaryCall(new HelloRequest { Name = "Balancer" }).ResponseAsync.DefaultTimeout();
+
+            // Assert
+            Assert.AreEqual("Bearer TEST", authorization);
+            Assert.AreEqual("Balancer", reply.Message);
         }
 
         private class RequestVersionHandler : DelegatingHandler

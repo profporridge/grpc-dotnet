@@ -16,9 +16,6 @@
 
 #endregion
 
-using System;
-using System.Linq;
-using System.Threading.Tasks;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Shared.TestAssets;
@@ -50,9 +47,12 @@ namespace Grpc.Testing
 
             foreach (var responseParam in request.ResponseParameters)
             {
+                // TODO(JamesNK): Remove nullable override after Grpc.Core.Api update
+#pragma warning disable CS8601 // Possible null reference assignment.
                 responseStream.WriteOptions = !(responseParam.Compressed?.Value ?? false)
                     ? new WriteOptions(WriteFlags.NoCompress)
                     : null;
+#pragma warning restore CS8601 // Possible null reference assignment.
 
                 var response = new StreamingOutputCallResponse { Payload = CreateZerosPayload(responseParam.Size) };
                 await responseStream.WriteAsync(response);
@@ -110,13 +110,15 @@ namespace Grpc.Testing
                 echoInitialList.Add(new Metadata.Entry("grpc-internal-encoding-request", "gzip"));
             }
 
-            if (echoInitialList.Any()) {
+            if (echoInitialList.Any())
+            {
                 var entry = echoInitialList.Single();
                 await context.WriteResponseHeadersAsync(new Metadata { entry });
             }
 
             var echoTrailingList = context.RequestHeaders.Where((entry) => entry.Key == "x-grpc-test-echo-trailing-bin").ToList();
-            if (echoTrailingList.Any()) {
+            if (echoTrailingList.Any())
+            {
                 context.ResponseTrailers.Add(echoTrailingList.Single());
             }
         }

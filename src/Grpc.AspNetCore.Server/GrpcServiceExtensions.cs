@@ -16,7 +16,6 @@
 
 #endregion
 
-using System;
 using Grpc.AspNetCore.Server;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.AspNetCore.Server.Model;
@@ -69,7 +68,7 @@ namespace Microsoft.Extensions.DependencyInjection
             services.TryAddSingleton(typeof(IGrpcServiceActivator<>), typeof(DefaultGrpcServiceActivator<>));
             services.TryAddSingleton(typeof(IGrpcInterceptorActivator<>), typeof(DefaultGrpcInterceptorActivator<>));
             services.TryAddEnumerable(ServiceDescriptor.Singleton<IConfigureOptions<GrpcServiceOptions>, GrpcServiceOptionsSetup>());
-            
+
             // Model
             services.TryAddSingleton<ServiceMethodsRegistry>();
             services.TryAddSingleton(typeof(ServiceRouteBuilder<>));

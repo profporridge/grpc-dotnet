@@ -16,21 +16,14 @@
 
 #endregion
 
-using System;
-using System.IO;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Threading;
-using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Internal.Http;
 using Grpc.Net.Client.Tests.Infrastructure;
-using Grpc.Shared;
 using Grpc.Tests.Shared;
-using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
 
 namespace Grpc.Net.Client.Tests
@@ -216,7 +209,7 @@ namespace Grpc.Net.Client.Tests
             {
                 Message = "Hello world 1"
             }).DefaultTimeout()).DefaultTimeout();
-            await streamContent.AddDataAndWait(new byte[0]);
+            await streamContent.AddDataAndWait(Array.Empty<byte>());
 
             var result = await resultTask.DefaultTimeout();
             Assert.AreEqual("Hello world 1", result.Message);
@@ -270,7 +263,7 @@ namespace Grpc.Net.Client.Tests
             // Assert
             Assert.AreEqual(StatusCode.OK, ex.StatusCode);
             Assert.AreEqual(StatusCode.OK, call.GetStatus().StatusCode);
-            Assert.AreEqual(null, call.GetStatus().Detail);
+            Assert.AreEqual(string.Empty, call.GetStatus().Detail);
 
             Assert.AreEqual("Hello world", result.Message);
         }

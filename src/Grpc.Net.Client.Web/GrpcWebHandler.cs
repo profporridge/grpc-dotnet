@@ -16,13 +16,6 @@
 
 #endregion
 
-using System;
-using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Net.Client.Web.Internal;
 using Grpc.Shared;
 
@@ -121,6 +114,14 @@ namespace Grpc.Net.Client.Web
         {
             request.Content = new GrpcWebRequestContent(request.Content!, GrpcWebMode);
 
+            // https://github.com/grpc/grpc/blob/f8a5022a2629e0929eb30e0583af66f0c220791b/doc/PROTOCOL-WEB.md
+            // The client library should indicate to the server via the "Accept" header that the response stream
+            // needs to be text encoded e.g. when XHR is used or due to security policies with XHR.
+            if (GrpcWebMode == GrpcWebMode.GrpcWebText)
+            {
+                request.Headers.TryAddWithoutValidation("Accept", GrpcWebProtocolConstants.GrpcWebTextContentType);
+            }
+
             if (OperatingSystem.IsBrowser)
             {
                 FixBrowserUserAgent(request);
@@ -153,6 +154,14 @@ namespace Grpc.Net.Client.Web
                 request.Version = System.Net.HttpVersion.Version11;
             }
 #endif
+#if NETSTANDARD2_0
+            else if (Http2NotSupported())
+            {
+                // Platform doesn't support HTTP/2. Default version to HTTP/1.1.
+                // This will get set on .NET Framework.
+                request.Version = System.Net.HttpVersion.Version11;
+            }
+#endif
 
             var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
@@ -175,6 +184,23 @@ namespace Grpc.Net.Client.Web
             response.Version = GrpcWebProtocolConstants.Http2Version;
 
             return response;
+        }
+
+        private bool Http2NotSupported()
+        {
+            if (Environment.Version.Major == 4 &&
+                Environment.Version.Minor == 0 &&
+                Environment.Version.Build == 30319 &&
+                InnerHandler != null &&
+                HttpRequestHelpers.HasHttpHandlerType<HttpClientHandler>(InnerHandler))
+            {
+                // https://docs.microsoft.com/dotnet/api/system.environment.version#remarks
+                // Detect runtimes between .NET 4.5 and .NET Core 2.1
+                // The default HttpClientHandler doesn't support HTTP/2.
+                return true;
+            }
+
+            return false;
         }
 
         private void FixBrowserUserAgent(HttpRequestMessage request)

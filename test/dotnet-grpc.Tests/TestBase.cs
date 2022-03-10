@@ -16,11 +16,7 @@
 
 #endregion
 
-using System.Collections.Generic;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Dotnet.Cli.Commands;
 using Microsoft.Build.Locator;
 using NUnit.Framework;
@@ -29,7 +25,7 @@ namespace Grpc.Dotnet.Cli.Tests
 {
     public class TestBase
     {
-        internal static readonly string SourceUrl = "https://contoso.com/greet.proto";
+        internal const string SourceUrl = "https://contoso.com/greet.proto";
 
         [OneTimeSetUp]
         public void OneTimeInitialize()

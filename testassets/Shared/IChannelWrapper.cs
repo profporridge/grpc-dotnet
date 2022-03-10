@@ -16,8 +16,6 @@
 
 #endregion
 
-using System.Net.Http;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client;
 
@@ -47,7 +45,7 @@ namespace Grpc.Shared.TestAssets
 #if !BLAZOR_WASM
     public class CoreChannelWrapper : IChannelWrapper
     {
-        private Channel _channel;
+        private readonly Channel _channel;
         public ChannelBase Channel => _channel;
 
         public CoreChannelWrapper(Channel channel)

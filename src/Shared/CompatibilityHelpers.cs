@@ -1,13 +1,8 @@
 ﻿// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Threading.Tasks;
 
 namespace Grpc.Shared
 {
@@ -40,5 +35,14 @@ namespace Grpc.Shared
             return task.IsCompletedSuccessfully;
         }
 #endif
+
+        public static int IndexOf(string s, char value, StringComparison comparisonType)
+        {
+#if NETSTANDARD2_0
+            return s.IndexOf(value);
+#else
+            return s.IndexOf(value, comparisonType);
+#endif
+        }
     }
 }

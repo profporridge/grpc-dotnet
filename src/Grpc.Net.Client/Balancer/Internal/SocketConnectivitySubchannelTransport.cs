@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -48,48 +49,72 @@ namespace Grpc.Net.Client.Balancer.Internal
     /// </summary>
     internal class SocketConnectivitySubchannelTransport : ISubchannelTransport, IDisposable
     {
+        internal readonly record struct ActiveStream(BalancerAddress Address, Socket Socket, Stream? Stream);
+
         private readonly ILogger _logger;
         private readonly Subchannel _subchannel;
         private readonly TimeSpan _socketPingInterval;
-        internal readonly List<(DnsEndPoint EndPoint, Socket Socket, Stream? Stream)> _activeStreams;
+        private readonly List<ActiveStream> _activeStreams;
         private readonly Timer _socketConnectedTimer;
 
         private int _lastEndPointIndex;
-        private Socket? _initialSocket;
-        private DnsEndPoint? _initialSocketEndPoint;
+        internal Socket? _initialSocket;
+        private BalancerAddress? _initialSocketAddress;
         private bool _disposed;
-        private DnsEndPoint? _currentEndPoint;
+        private BalancerAddress? _currentAddress;
 
         public SocketConnectivitySubchannelTransport(Subchannel subchannel, TimeSpan socketPingInterval, ILoggerFactory loggerFactory)
         {
             _logger = loggerFactory.CreateLogger<SocketConnectivitySubchannelTransport>();
             _subchannel = subchannel;
             _socketPingInterval = socketPingInterval;
-            _activeStreams = new List<(DnsEndPoint, Socket, Stream?)>();
+            _activeStreams = new List<ActiveStream>();
             _socketConnectedTimer = new Timer(OnCheckSocketConnection, state: null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
 
         public object Lock => _subchannel.Lock;
-        public DnsEndPoint? CurrentEndPoint => _currentEndPoint;
+        public BalancerAddress? CurrentAddress => _currentAddress;
         public bool HasStream { get; }
+
+        // For testing. Take a copy under lock for thread-safety.
+        internal IReadOnlyList<ActiveStream> GetActiveStreams()
+        {
+            lock (Lock)
+            {
+                return _activeStreams.ToList();
+            }
+        }
 
         public void Disconnect()
         {
             lock (Lock)
             {
-                _initialSocket?.Dispose();
-                _initialSocket = null;
-                _initialSocketEndPoint = null;
-                _lastEndPointIndex = 0;
+                if (_disposed)
+                {
+                    return;
+                }
+
+                DisconnectUnsynchronized();
                 _socketConnectedTimer.Change(TimeSpan.Zero, TimeSpan.Zero);
-                _currentEndPoint = null;
             }
-            _subchannel.UpdateConnectivityState(ConnectivityState.Idle);
+            _subchannel.UpdateConnectivityState(ConnectivityState.Idle, "Disconnected.");
+        }
+
+        private void DisconnectUnsynchronized()
+        {
+            Debug.Assert(Monitor.IsEntered(Lock));
+            Debug.Assert(!_disposed);
+
+            _initialSocket?.Dispose();
+            _initialSocket = null;
+            _initialSocketAddress = null;
+            _lastEndPointIndex = 0;
+            _currentAddress = null;
         }
 
         public async ValueTask<bool> TryConnectAsync(CancellationToken cancellationToken)
         {
-            Debug.Assert(CurrentEndPoint == null);
+            Debug.Assert(CurrentAddress == null);
 
             // Addresses could change while connecting. Make a copy of the subchannel's addresses.
             var addresses = _subchannel.GetAddresses();
@@ -100,34 +125,34 @@ namespace Grpc.Net.Client.Balancer.Internal
             for (var i = 0; i < addresses.Count; i++)
             {
                 var currentIndex = (i + _lastEndPointIndex) % addresses.Count;
-                var currentEndPoint = addresses[currentIndex];
+                var currentAddress = addresses[currentIndex];
 
                 Socket socket;
 
                 socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-                _subchannel.UpdateConnectivityState(ConnectivityState.Connecting);
+                _subchannel.UpdateConnectivityState(ConnectivityState.Connecting, "Connecting to socket.");
 
                 try
                 {
-                    SocketConnectivitySubchannelTransportLog.ConnectingSocket(_logger, currentEndPoint);
-                    await socket.ConnectAsync(currentEndPoint, cancellationToken).ConfigureAwait(false);
-                    SocketConnectivitySubchannelTransportLog.ConnectedSocket(_logger, currentEndPoint);
+                    SocketConnectivitySubchannelTransportLog.ConnectingSocket(_logger, _subchannel.Id, currentAddress);
+                    await socket.ConnectAsync(currentAddress.EndPoint, cancellationToken).ConfigureAwait(false);
+                    SocketConnectivitySubchannelTransportLog.ConnectedSocket(_logger, _subchannel.Id, currentAddress);
 
                     lock (Lock)
                     {
-                        _currentEndPoint = currentEndPoint;
+                        _currentAddress = currentAddress;
                         _lastEndPointIndex = currentIndex;
                         _initialSocket = socket;
-                        _initialSocketEndPoint = currentEndPoint;
+                        _initialSocketAddress = currentAddress;
                         _socketConnectedTimer.Change(_socketPingInterval, _socketPingInterval);
                     }
 
-                    _subchannel.UpdateConnectivityState(ConnectivityState.Ready);
+                    _subchannel.UpdateConnectivityState(ConnectivityState.Ready, "Successfully connected to socket.");
                     return true;
                 }
                 catch (Exception ex)
                 {
-                    SocketConnectivitySubchannelTransportLog.ErrorConnectingSocket(_logger, currentEndPoint, ex);
+                    SocketConnectivitySubchannelTransportLog.ErrorConnectingSocket(_logger, _subchannel.Id, currentAddress, ex);
 
                     if (firstConnectionError == null)
                     {
@@ -157,13 +182,14 @@ namespace Grpc.Net.Client.Balancer.Internal
                 var socket = _initialSocket;
                 if (socket != null)
                 {
-                    CompatibilityHelpers.Assert(_initialSocketEndPoint != null);
+                    CompatibilityHelpers.Assert(_initialSocketAddress != null);
 
                     var closeSocket = false;
+                    Exception? sendException = null;
                     try
                     {
                         // Check the socket is still valid by doing a zero byte send.
-                        SocketConnectivitySubchannelTransportLog.CheckingSocket(_logger, _initialSocketEndPoint);
+                        SocketConnectivitySubchannelTransportLog.CheckingSocket(_logger, _subchannel.Id, _initialSocketAddress);
                         await socket.SendAsync(Array.Empty<byte>(), SocketFlags.None).ConfigureAwait(false);
 
                         // Also poll socket to check if it can be read from.
@@ -172,46 +198,48 @@ namespace Grpc.Net.Client.Balancer.Internal
                     catch (Exception ex)
                     {
                         closeSocket = true;
-                        SocketConnectivitySubchannelTransportLog.ErrorCheckingSocket(_logger, _initialSocketEndPoint, ex);
+                        sendException = ex;
+                        SocketConnectivitySubchannelTransportLog.ErrorCheckingSocket(_logger, _subchannel.Id, _initialSocketAddress, ex);
                     }
 
                     if (closeSocket)
                     {
                         lock (Lock)
                         {
+                            if (_disposed)
+                            {
+                                return;
+                            }
+
                             if (_initialSocket == socket)
                             {
-                                _initialSocket.Dispose();
-                                _initialSocket = null;
-                                _initialSocketEndPoint = null;
-                                _currentEndPoint = null;
-                                _lastEndPointIndex = 0;
+                                DisconnectUnsynchronized();
                             }
                         }
-                        _subchannel.UpdateConnectivityState(ConnectivityState.Idle);
+                        _subchannel.UpdateConnectivityState(ConnectivityState.Idle, new Status(StatusCode.Unavailable, "Lost connection to socket.", sendException));
                     }
                 }
             }
             catch (Exception ex)
             {
-                SocketConnectivitySubchannelTransportLog.ErrorSocketTimer(_logger, ex);
+                SocketConnectivitySubchannelTransportLog.ErrorSocketTimer(_logger, _subchannel.Id, ex);
             }
         }
 
-        public async ValueTask<Stream> GetStreamAsync(DnsEndPoint endPoint, CancellationToken cancellationToken)
+        public async ValueTask<Stream> GetStreamAsync(BalancerAddress address, CancellationToken cancellationToken)
         {
-            SocketConnectivitySubchannelTransportLog.CreatingStream(_logger, endPoint);
+            SocketConnectivitySubchannelTransportLog.CreatingStream(_logger, _subchannel.Id, address);
 
             Socket? socket = null;
             lock (Lock)
             {
                 if (_initialSocket != null &&
-                    _initialSocketEndPoint != null &&
-                    Equals(_initialSocketEndPoint, endPoint))
+                    _initialSocketAddress != null &&
+                    Equals(_initialSocketAddress, address))
                 {
                     socket = _initialSocket;
                     _initialSocket = null;
-                    _initialSocketEndPoint = null;
+                    _initialSocketAddress = null;
                 }
             }
 
@@ -230,7 +258,7 @@ namespace Grpc.Net.Client.Balancer.Internal
             if (socket == null)
             {
                 socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-                await socket.ConnectAsync(endPoint, cancellationToken).ConfigureAwait(false);
+                await socket.ConnectAsync(address.EndPoint, cancellationToken).ConfigureAwait(false);
             }
 
             var networkStream = new NetworkStream(socket, ownsSocket: true);
@@ -240,7 +268,7 @@ namespace Grpc.Net.Client.Balancer.Internal
 
             lock (Lock)
             {
-                _activeStreams.Add((endPoint, socket, stream));
+                _activeStreams.Add(new ActiveStream(address, socket, stream));
             }
 
             return stream;
@@ -261,32 +289,40 @@ namespace Grpc.Net.Client.Balancer.Internal
 
         private void OnStreamDisposed(Stream streamWrapper)
         {
-            var disconnect = false;
-            lock (Lock)
+            try
             {
-                for (var i = _activeStreams.Count - 1; i >= 0; i--)
+                var disconnect = false;
+                lock (Lock)
                 {
-                    var t = _activeStreams[i];
-                    if (t.Stream == streamWrapper)
+                    for (var i = _activeStreams.Count - 1; i >= 0; i--)
                     {
-                        _activeStreams.RemoveAt(i);
-                        SocketConnectivitySubchannelTransportLog.DisposingStream(_logger, t.EndPoint);
+                        var t = _activeStreams[i];
+                        if (t.Stream == streamWrapper)
+                        {
+                            _activeStreams.RemoveAt(i);
+                            SocketConnectivitySubchannelTransportLog.DisposingStream(_logger, _subchannel.Id, t.Address);
 
-                        // If the last active streams is removed then there is no active connection.
-                        disconnect = _activeStreams.Count == 0;
+                            // If the last active streams is removed then there is no active connection.
+                            disconnect = _activeStreams.Count == 0;
 
-                        break;
+                            break;
+                        }
                     }
                 }
-            }
 
-            if (disconnect)
+                if (disconnect)
+                {
+                    // What happens after disconnect depends if the load balancer requests a new connection.
+                    // For example:
+                    // - Pick first will go into an idle state.
+                    // - Round-robin will reconnect to get back to a ready state.
+                    Disconnect();
+                }
+            }
+            catch (Exception ex)
             {
-                // What happens after disconnect depends if the load balancer requests a new connection.
-                // For example:
-                // - Pick first will go into an idle state.
-                // - Round-robin will reconnect to get back to a ready state.
-                Disconnect();
+                // Don't throw error to Stream.Dispose() caller.
+                SocketConnectivitySubchannelTransportLog.ErrorOnDisposingStream(_logger, _subchannel.Id, ex);
             }
         }
 
@@ -294,80 +330,101 @@ namespace Grpc.Net.Client.Balancer.Internal
         {
             lock (Lock)
             {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                SocketConnectivitySubchannelTransportLog.DisposingTransport(_logger, _subchannel.Id);
+
+                DisconnectUnsynchronized();
+
                 _socketConnectedTimer.Dispose();
                 _disposed = true;
             }
-        }
-
-        public void OnRequestComplete(CompletionContext context)
-        {
         }
     }
 
     internal static class SocketConnectivitySubchannelTransportLog
     {
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _connectingSocket =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Trace, new EventId(1, "ConnectingSocket"), "Connecting socket to '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _connectingSocket =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Trace, new EventId(1, "ConnectingSocket"), "Subchannel id '{SubchannelId}' connecting socket to {Address}.");
 
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _connectedSocket =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Debug, new EventId(1, "ConnectedSocket"), "Connected to socket '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _connectedSocket =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Debug, new EventId(2, "ConnectedSocket"), "Subchannel id '{SubchannelId}' connected to socket {Address}.");
 
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _errorConnectingSocket =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Error, new EventId(1, "ErrorConnectingSocket"), "Error connecting to socket '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _errorConnectingSocket =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Debug, new EventId(3, "ErrorConnectingSocket"), "Subchannel id '{SubchannelId}' error connecting to socket {Address}.");
 
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _checkingSocket =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Trace, new EventId(1, "CheckingSocket"), "Checking socket '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _checkingSocket =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Trace, new EventId(4, "CheckingSocket"), "Subchannel id '{SubchannelId}' checking socket {Address}.");
 
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _errorCheckingSocket =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Error, new EventId(1, "ErrorCheckingSocket"), "Error checking socket '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _errorCheckingSocket =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Debug, new EventId(5, "ErrorCheckingSocket"), "Subchannel id '{SubchannelId}' error checking socket {Address}.");
 
-        private static readonly Action<ILogger, Exception?> _errorSocketTimer =
-            LoggerMessage.Define(LogLevel.Error, new EventId(1, "ErrorSocketTimer"), "Unexpected error in check socket timer.");
+        private static readonly Action<ILogger, int, Exception?> _errorSocketTimer =
+            LoggerMessage.Define<int>(LogLevel.Error, new EventId(6, "ErrorSocketTimer"), "Subchannel id '{SubchannelId}' unexpected error in check socket timer.");
 
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _creatingStream =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Trace, new EventId(1, "CreatingStream"), "Creating stream for '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _creatingStream =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Trace, new EventId(7, "CreatingStream"), "Subchannel id '{SubchannelId}' creating stream for {Address}.");
 
-        private static readonly Action<ILogger, DnsEndPoint, Exception?> _disposingStream =
-            LoggerMessage.Define<DnsEndPoint>(LogLevel.Trace, new EventId(1, "DisposingStream"), "Disposing stream for '{Address}'.");
+        private static readonly Action<ILogger, int, BalancerAddress, Exception?> _disposingStream =
+            LoggerMessage.Define<int, BalancerAddress>(LogLevel.Trace, new EventId(8, "DisposingStream"), "Subchannel id '{SubchannelId}' disposing stream for {Address}.");
 
-        public static void ConnectingSocket(ILogger logger, DnsEndPoint address)
+        private static readonly Action<ILogger, int, Exception?> _disposingTransport =
+            LoggerMessage.Define<int>(LogLevel.Trace, new EventId(9, "DisposingTransport"), "Subchannel id '{SubchannelId}' disposing transport.");
+
+        private static readonly Action<ILogger, int, Exception> _errorOnDisposingStream =
+            LoggerMessage.Define<int>(LogLevel.Error, new EventId(10, "ErrorOnDisposingStream"), "Subchannel id '{SubchannelId}' unexpected error when reacting to transport stream dispose.");
+
+        public static void ConnectingSocket(ILogger logger, int subchannelId, BalancerAddress address)
         {
-            _connectingSocket(logger, address, null);
+            _connectingSocket(logger, subchannelId, address, null);
         }
 
-        public static void ConnectedSocket(ILogger logger, DnsEndPoint address)
+        public static void ConnectedSocket(ILogger logger, int subchannelId, BalancerAddress address)
         {
-            _connectedSocket(logger, address, null);
+            _connectedSocket(logger, subchannelId, address, null);
         }
 
-        public static void ErrorConnectingSocket(ILogger logger, DnsEndPoint address, Exception ex)
+        public static void ErrorConnectingSocket(ILogger logger, int subchannelId, BalancerAddress address, Exception ex)
         {
-            _errorConnectingSocket(logger, address, ex);
+            _errorConnectingSocket(logger, subchannelId, address, ex);
         }
 
-        public static void CheckingSocket(ILogger logger, DnsEndPoint address)
+        public static void CheckingSocket(ILogger logger, int subchannelId, BalancerAddress address)
         {
-            _checkingSocket(logger, address, null);
+            _checkingSocket(logger, subchannelId, address, null);
         }
 
-        public static void ErrorCheckingSocket(ILogger logger, DnsEndPoint address, Exception ex)
+        public static void ErrorCheckingSocket(ILogger logger, int subchannelId, BalancerAddress address, Exception ex)
         {
-            _errorCheckingSocket(logger, address, ex);
+            _errorCheckingSocket(logger, subchannelId, address, ex);
         }
 
-        public static void ErrorSocketTimer(ILogger logger, Exception ex)
+        public static void ErrorSocketTimer(ILogger logger, int subchannelId, Exception ex)
         {
-            _errorSocketTimer(logger, ex);
+            _errorSocketTimer(logger, subchannelId, ex);
         }
 
-        public static void CreatingStream(ILogger logger, DnsEndPoint address)
+        public static void CreatingStream(ILogger logger, int subchannelId, BalancerAddress address)
         {
-            _creatingStream(logger, address, null);
+            _creatingStream(logger, subchannelId, address, null);
         }
 
-        public static void DisposingStream(ILogger logger, DnsEndPoint address)
+        public static void DisposingStream(ILogger logger, int subchannelId, BalancerAddress address)
         {
-            _disposingStream(logger, address, null);
+            _disposingStream(logger, subchannelId, address, null);
+        }
+
+        public static void DisposingTransport(ILogger logger, int subchannelId)
+        {
+            _disposingTransport(logger, subchannelId, null);
+        }
+
+        public static void ErrorOnDisposingStream(ILogger logger, int subchannelId, Exception ex)
+        {
+            _errorOnDisposingStream(logger, subchannelId, ex);
         }
     }
 #endif

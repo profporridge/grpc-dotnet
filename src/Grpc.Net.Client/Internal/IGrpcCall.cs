@@ -16,9 +16,6 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Threading.Tasks;
 using Grpc.Core;
 
 #if NETSTANDARD2_0
@@ -45,5 +42,7 @@ namespace Grpc.Net.Client.Internal
         void StartDuplexStreaming();
 
         Task WriteClientStreamAsync<TState>(Func<GrpcCall<TRequest, TResponse>, Stream, CallOptions, TState, ValueTask> writeFunc, TState state);
+
+        bool Disposed { get; }
     }
 }

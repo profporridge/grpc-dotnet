@@ -16,11 +16,7 @@
 
 #endregion
 
-using System;
 using System.CommandLine.IO;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
 using Grpc.Dotnet.Cli.Commands;
 using Grpc.Dotnet.Cli.Options;
 using NUnit.Framework;
@@ -53,8 +49,8 @@ namespace Grpc.Dotnet.Cli.Tests
 
             var protoRefs = command.Project.GetItems(CommandBase.ProtobufElement);
             Assert.AreEqual(2, protoRefs.Count);
-            Assert.NotNull(protoRefs.SingleOrDefault(r => r.UnevaluatedInclude == Path.Combine("Proto", "a.proto")));
-            Assert.NotNull(protoRefs.SingleOrDefault(r => r.UnevaluatedInclude == Path.Combine("Proto", "b.proto")));
+            Assert.NotNull(protoRefs.SingleOrDefault(r => r.UnevaluatedInclude == "Proto\\a.proto"));
+            Assert.NotNull(protoRefs.SingleOrDefault(r => r.UnevaluatedInclude == "Proto\\b.proto"));
             foreach (var protoRef in protoRefs)
             {
                 Assert.AreEqual("Server", protoRef.GetMetadataValue(CommandBase.GrpcServicesElement));

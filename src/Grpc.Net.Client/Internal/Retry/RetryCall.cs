@@ -16,11 +16,7 @@
 
 #endregion
 
-using System;
 using System.Diagnostics;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Shared;
 using Log = Grpc.Net.Client.Internal.Retry.RetryCallBaseLog;
@@ -114,14 +110,14 @@ namespace Grpc.Net.Client.Internal.Retry
                         currentCall = _activeCall = HttpClientCallInvoker.CreateGrpcCall<TRequest, TResponse>(Channel, Method, Options, AttemptCount);
                         startCallFunc(currentCall);
 
+                        SetNewActiveCallUnsynchronized(currentCall);
+
                         if (CommitedCallTask.IsCompletedSuccessfully())
                         {
                             // Call has already been commited. This could happen if written messages exceed
                             // buffer limits, which causes the call to immediately become commited and to clear buffers.
                             return;
                         }
-
-                        SetNewActiveCallUnsynchronized(currentCall);
                     }
 
                     Status? responseStatus;
@@ -129,14 +125,7 @@ namespace Grpc.Net.Client.Internal.Retry
                     HttpResponseMessage? httpResponse = null;
                     try
                     {
-                        if (currentCall._httpResponseTask == null)
-                        {
-                            // There is no response task if there was a preemptive cancel.
-                            CompatibilityHelpers.Assert(currentCall.CancellationToken.IsCancellationRequested, "Request should have been made if call is not preemptively cancelled.");
-                            currentCall.CancellationToken.ThrowIfCancellationRequested();
-                        }
-
-                        httpResponse = await currentCall._httpResponseTask!.ConfigureAwait(false);
+                        httpResponse = await currentCall.HttpResponseTask.ConfigureAwait(false);
                         responseStatus = GrpcCall.ValidateHeaders(httpResponse, out _);
                     }
                     catch (RpcException ex)
@@ -159,9 +148,12 @@ namespace Grpc.Net.Client.Internal.Retry
 
                     CancellationTokenSource.Token.ThrowIfCancellationRequested();
 
-                    // Check to see the response returned from the server makes the call commited
-                    // Null status code indicates the headers were valid and a "Response-Headers" response
-                    // was received from the server.
+                    // Check to see the response returned from the server makes the call commited.
+                    // 1. Null status code indicates the headers were valid and a "Response-Headers" response
+                    //    was received from the server.
+                    // 2. An OK response status at this point means a streaming call completed without
+                    //    sending any messages to the client.
+                    //
                     // https://github.com/grpc/proposal/blob/master/A6-client-retries.md#when-retries-are-valid
                     if (responseStatus == null)
                     {
@@ -177,6 +169,15 @@ namespace Grpc.Net.Client.Internal.Retry
                         // Commited so exit retry loop.
                         return;
                     }
+                    else if (IsSuccessfulStreamingCall(responseStatus.GetValueOrDefault(), currentCall))
+                    {
+                        // Headers were returned. We're commited.
+                        CommitCall(currentCall, CommitReason.ResponseHeadersReceived);
+                        RetryAttemptCallSuccess();
+
+                        // Commited so exit retry loop.
+                        return;
+                    }
 
                     if (CommitedCallTask.IsCompletedSuccessfully())
                     {
@@ -185,8 +186,7 @@ namespace Grpc.Net.Client.Internal.Retry
                         return;
                     }
 
-                    Status status = responseStatus.Value;
-
+                    var status = responseStatus.GetValueOrDefault();
                     var retryPushbackMS = GetRetryPushback(httpResponse);
 
                     // Failures only count towards retry throttling if they have a known, retriable status.
@@ -245,8 +245,28 @@ namespace Grpc.Net.Client.Internal.Retry
             }
             finally
             {
+                if (CommitedCallTask.IsCompletedSuccessfully())
+                {
+                    if (CommitedCallTask.Result is GrpcCall<TRequest, TResponse> call)
+                    {
+                        // Wait until the commited call is finished and then clean up retry call.
+                        await call.CallTask.ConfigureAwait(false);
+                        Cleanup();
+                    }
+                }
+
                 Log.StoppingRetryWorker(Logger);
             }
+        }
+
+        private static bool IsSuccessfulStreamingCall(Status responseStatus, GrpcCall<TRequest, TResponse> call)
+        {
+            if (responseStatus.StatusCode != StatusCode.OK)
+            {
+                return false;
+            }
+
+            return call.Method.Type == MethodType.ServerStreaming || call.Method.Type == MethodType.DuplexStreaming;
         }
 
         protected override void OnCommitCall(IGrpcCall<TRequest, TResponse> call)

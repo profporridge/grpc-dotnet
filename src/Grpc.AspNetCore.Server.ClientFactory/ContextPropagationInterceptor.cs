@@ -16,10 +16,7 @@
 
 #endregion
 
-using System;
 using System.Diagnostics.CodeAnalysis;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.AspNetCore.Server;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
@@ -31,8 +28,8 @@ namespace Grpc.AspNetCore.ClientFactory
 {
     /// <summary>
     /// Interceptor that will set the current request's cancellation token and deadline onto CallOptions.
-    /// This interceptor is registered with a singleton lifetime. The interceptor gets the request from
-    /// IHttpContextAccessor, which is also a singleton. IHttpContextAccessor uses an async local value.
+    /// The interceptor gets the request from IHttpContextAccessor, which is a singleton.
+    /// IHttpContextAccessor uses an async local value.
     /// </summary>
     internal class ContextPropagationInterceptor : Interceptor
     {
@@ -40,9 +37,9 @@ namespace Grpc.AspNetCore.ClientFactory
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ILogger _logger;
 
-        public ContextPropagationInterceptor(IOptions<GrpcContextPropagationOptions> options, IHttpContextAccessor httpContextAccessor, ILogger<ContextPropagationInterceptor> logger)
+        public ContextPropagationInterceptor(GrpcContextPropagationOptions options, IHttpContextAccessor httpContextAccessor, ILogger<ContextPropagationInterceptor> logger)
         {
-            _options = options.Value;
+            _options = options;
             _httpContextAccessor = httpContextAccessor;
             _logger = logger;
         }
@@ -175,7 +172,7 @@ namespace Grpc.AspNetCore.ClientFactory
             return new ClientInterceptorContext<TRequest, TResponse>(context.Method, context.Host, options);
         }
 
-        private bool TryGetServerCallContext([NotNullWhen(true)]out ServerCallContext? serverCallContext, [NotNullWhen(false)]out string? errorMessage)
+        private bool TryGetServerCallContext([NotNullWhen(true)] out ServerCallContext? serverCallContext, [NotNullWhen(false)] out string? errorMessage)
         {
             var httpContext = _httpContextAccessor.HttpContext;
             if (httpContext == null)

@@ -16,22 +16,17 @@
 
 #endregion
 
-using System;
 using System.Diagnostics.CodeAnalysis;
-using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Grpc.AspNetCore.Server.Internal
 {
     internal sealed class DefaultGrpcServiceActivator<
 #if NET5_0_OR_GREATER
-        [DynamicallyAccessedMembers(ServiceAccessibility)]
+        [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
 #endif
         TGrpcService> : IGrpcServiceActivator<TGrpcService> where TGrpcService : class
     {
-#if NET5_0_OR_GREATER
-        internal const DynamicallyAccessedMemberTypes ServiceAccessibility = DynamicallyAccessedMemberTypes.PublicConstructors;
-#endif
         private static readonly Lazy<ObjectFactory> _objectFactory = new Lazy<ObjectFactory>(static () => ActivatorUtilities.CreateFactory(typeof(TGrpcService), Type.EmptyTypes));
 
         public GrpcActivatorHandle<TGrpcService> Create(IServiceProvider serviceProvider)

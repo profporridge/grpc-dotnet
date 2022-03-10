@@ -16,11 +16,11 @@
 
 #endregion
 
-using System;
 using Grpc.AspNetCore.ClientFactory;
 using Grpc.Core;
 using Grpc.Net.ClientFactory;
-using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Microsoft.Extensions.DependencyInjection
@@ -31,8 +31,8 @@ namespace Microsoft.Extensions.DependencyInjection
     public static class GrpcServerHttpClientBuilderExtensions
     {
         /// <summary>
-        /// Configures the server to propagate values from a call's <see cref="ServerCallContext"/>
-        /// onto the gRPC client.
+        /// Configures the server to propagate a call's <see cref="ServerCallContext.CancellationToken"/> and
+        /// <see cref="ServerCallContext.Deadline"/> onto the gRPC client.
         /// </summary>
         /// <param name="builder">The <see cref="IHttpClientBuilder"/>.</param>
         /// <returns>An <see cref="IHttpClientBuilder"/> that can be used to configure the client.</returns>
@@ -43,24 +43,14 @@ namespace Microsoft.Extensions.DependencyInjection
                 throw new ArgumentNullException(nameof(builder));
             }
 
-            ValidateGrpcClient(builder);
-
-            builder.Services.TryAddSingleton<ContextPropagationInterceptor>();
-            builder.Services.AddHttpContextAccessor();
-            builder.Services.AddTransient<IConfigureOptions<GrpcClientFactoryOptions>>(services =>
-            {
-                return new ConfigureNamedOptions<GrpcClientFactoryOptions>(builder.Name, options =>
-                {
-                    options.Interceptors.Add(services.GetRequiredService<ContextPropagationInterceptor>());
-                });
-            });
+            EnableCallContextPropagationCore(builder, new GrpcContextPropagationOptions());
 
             return builder;
         }
 
         /// <summary>
-        /// Configures the server to propagate values from a call's <see cref="ServerCallContext"/>
-        /// onto the gRPC client.
+        /// Configures the server to propagate a call's <see cref="ServerCallContext.CancellationToken"/> and
+        /// <see cref="ServerCallContext.Deadline"/> onto the gRPC client.
         /// </summary>
         /// <param name="builder">The <see cref="IHttpClientBuilder"/>.</param>
         /// <param name="configureOptions">An <see cref="Action{GrpcContextPropagationOptions}"/> to configure the provided <see cref="GrpcContextPropagationOptions"/>.</param>
@@ -72,8 +62,34 @@ namespace Microsoft.Extensions.DependencyInjection
                 throw new ArgumentNullException(nameof(builder));
             }
 
-            builder.Services.Configure(configureOptions);
-            return builder.EnableCallContextPropagation();
+            if (configureOptions == null)
+            {
+                throw new ArgumentNullException(nameof(configureOptions));
+            }
+
+            var options = new GrpcContextPropagationOptions();
+            configureOptions(options);
+            EnableCallContextPropagationCore(builder, options);
+
+            return builder;
+        }
+
+        private static void EnableCallContextPropagationCore(IHttpClientBuilder builder, GrpcContextPropagationOptions options)
+        {
+            ValidateGrpcClient(builder);
+
+            builder.Services.AddHttpContextAccessor();
+            builder.Services.Configure<GrpcClientFactoryOptions>(builder.Name, o =>
+            {
+                o.InterceptorRegistrations.Add(new InterceptorRegistration(
+                    InterceptorScope.Channel,
+                    s =>
+                    {
+                        var accessor = s.GetRequiredService<IHttpContextAccessor>();
+                        var logger = s.GetRequiredService<ILogger<ContextPropagationInterceptor>>();
+                        return new ContextPropagationInterceptor(options, accessor, logger);
+                    }));
+            });
         }
 
         private static void ValidateGrpcClient(IHttpClientBuilder builder)

@@ -16,12 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
 using System.Net.Http.Headers;
-using System.Reflection;
 using Grpc.Core;
 using Grpc.Net.Compression;
 
@@ -57,7 +52,9 @@ namespace Grpc.Net.Client.Internal
         internal static readonly Dictionary<string, ICompressionProvider> DefaultCompressionProviders = new Dictionary<string, ICompressionProvider>(StringComparer.Ordinal)
         {
             ["gzip"] = new GzipCompressionProvider(System.IO.Compression.CompressionLevel.Fastest),
-            // deflate is not supported. .NET's DeflateStream does not support RFC1950 - https://github.com/dotnet/corefx/issues/7570
+#if NET6_0_OR_GREATER
+            ["deflate"] = new DeflateCompressionProvider(System.IO.Compression.CompressionLevel.Fastest),
+#endif
         };
 
         internal const int MessageDelimiterSize = 4; // how many bytes it takes to encode "Message-Length"
@@ -87,27 +84,8 @@ namespace Grpc.Net.Client.Internal
 
         static GrpcProtocolConstants()
         {
-            var userAgent = "grpc-dotnet";
-
-            // Use the assembly file version in the user agent.
-            // We are not using `AssemblyInformationalVersionAttribute` because Source Link appends
-            // the git hash to it, and sending a long user agent has perf implications.
-            var assemblyVersion = typeof(GrpcProtocolConstants)
-                .Assembly
-                .GetCustomAttributes<AssemblyFileVersionAttribute>()
-                .FirstOrDefault();
-
-            Debug.Assert(assemblyVersion != null);
-
-            // Assembly file version attribute should always be present,
-            // but in case it isn't then don't include version in user-agent.
-            if (assemblyVersion != null)
-            {
-                userAgent += "/" + assemblyVersion.Version;
-            }
-
             UserAgentHeader = "User-Agent";
-            UserAgentHeaderValue = userAgent;
+            UserAgentHeaderValue = UserAgentGenerator.GetUserAgentString();
             TEHeader = "TE";
             TEHeaderValue = "trailers";
 

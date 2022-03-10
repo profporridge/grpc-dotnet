@@ -16,10 +16,8 @@
 
 #endregion
 
-using System;
 using System.Diagnostics;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace Grpc.AspNetCore.FunctionalTests.Linker.Helpers
 {
@@ -115,7 +113,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Linker.Helpers
             {
                 // Ignore error
             }
-            
+
             Process.Dispose();
         }
     }

@@ -16,14 +16,13 @@
 
 #endregion
 
-using System;
 using Grpc.Core;
 
 namespace Grpc.AspNetCore.Server.Tests.TestObjects.Services.WithoutAttribute
 {
     public static partial class GreeterWithoutAttribute
     {
-        static readonly string __ServiceName = "Greet.Greeter";
+        const string __ServiceName = "Greet.Greeter";
 
         static readonly Marshaller<global::Greet.HelloRequest> __Marshaller_Greet_HelloRequest = Marshallers.Create((arg) => global::Google.Protobuf.MessageExtensions.ToByteArray(arg), global::Greet.HelloRequest.Parser.ParseFrom);
         static readonly Marshaller<global::Greet.HelloReply> __Marshaller_Greet_HelloReply = Marshallers.Create((arg) => global::Google.Protobuf.MessageExtensions.ToByteArray(arg), global::Greet.HelloReply.Parser.ParseFrom);

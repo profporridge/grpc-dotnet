@@ -16,8 +16,7 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
@@ -70,7 +69,10 @@ namespace Grpc.AspNetCore.Server.Internal
 #endif
 
         internal const string IdentityGrpcEncoding = "identity";
-        internal const int Http2ResetStreamNoError = 0;
+        internal const int Http2ResetStreamCancel = 0x8;
+#if NET6_0_OR_GREATER
+        internal const int Http3ResetStreamCancel = 0x010c;
+#endif
 
         internal static readonly HashSet<string> FilteredHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -115,5 +117,18 @@ namespace Grpc.AspNetCore.Server.Internal
             return ReferenceEquals(encoding, IdentityGrpcEncoding) ||
                 string.Equals(encoding, IdentityGrpcEncoding, StringComparison.Ordinal);
         }
+
+        internal static int GetCancelErrorCode(string protocol)
+        {
+#if NET6_0_OR_GREATER
+            return IsHttp3(protocol) ? Http3ResetStreamCancel : Http2ResetStreamCancel;
+#else
+            return Http2ResetStreamCancel;
+#endif
+        }
+
+#if NET5_0_OR_GREATER
+        internal const DynamicallyAccessedMemberTypes ServiceAccessibility = DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods;
+#endif
     }
 }

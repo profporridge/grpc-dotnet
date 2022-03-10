@@ -16,10 +16,6 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 
 #if NETSTANDARD2_0
@@ -38,6 +34,7 @@ namespace Grpc.Net.Client.Internal.Retry
 
         public IClientStreamWriter<TRequest>? ClientStreamWriter => _clientStreamWriter ??= new StatusClientStreamWriter(_status);
         public IAsyncStreamReader<TResponse>? ClientStreamReader => _clientStreamReader ??= new StatusStreamReader(_status);
+        public bool Disposed => true;
 
         public StatusGrpcCall(Status status)
         {
@@ -97,7 +94,10 @@ namespace Grpc.Net.Client.Internal.Retry
         {
             private readonly Status _status;
 
+            // TODO(JamesNK): Remove nullable override after Grpc.Core.Api update
+#pragma warning disable CS8766 // Nullability of reference types in return type doesn't match implicitly implemented member (possibly because of nullability attributes).
             public WriteOptions? WriteOptions { get; set; }
+#pragma warning restore CS8766 // Nullability of reference types in return type doesn't match implicitly implemented member (possibly because of nullability attributes).
 
             public StatusClientStreamWriter(Status status)
             {

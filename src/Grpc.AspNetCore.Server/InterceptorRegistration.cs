@@ -16,17 +16,14 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.Linq;
-using Grpc.AspNetCore.Server.Internal;
+using Grpc.Core.Interceptors;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Grpc.AspNetCore.Server
 {
     /// <summary>
-    /// Representation of a registration of the interceptor in the pipeline.
+    /// Representation of a registration of an <see cref="Interceptor"/> in the server pipeline.
     /// </summary>
     public class InterceptorRegistration
     {
@@ -78,6 +75,10 @@ namespace Grpc.AspNetCore.Server
         private IGrpcInterceptorActivator? _interceptorActivator;
         private ObjectFactory? _factory;
 
+#if NET5_0_OR_GREATER
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2026:UnrecognizedReflectionPattern",
+            Justification = "Type parameter members are preserved with DynamicallyAccessedMembers on InterceptorRegistration.Type property.")]
+#endif
         internal IGrpcInterceptorActivator GetActivator(IServiceProvider serviceProvider)
         {
             // Not thread safe. Side effect is resolving the service twice.

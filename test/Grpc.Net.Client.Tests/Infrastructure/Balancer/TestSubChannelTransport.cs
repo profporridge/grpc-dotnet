@@ -31,12 +31,20 @@ namespace Grpc.Net.Client.Tests.Infrastructure.Balancer
     internal class TestSubchannelTransport : ISubchannelTransport
     {
         private ConnectivityState _state = ConnectivityState.Idle;
-        private TaskCompletionSource<object?> _connectTcs;
+
+/* Unmerged change from project 'Grpc.Net.Client.Tests(net6.0)'
+Before:
+        private readonly Func<CancellationToken, Task<ConnectivityState>>? _onTryConnect;
+After:
+        private readonly TaskCompletionSource<object?> _connectTcs;
+        private readonly Func<CancellationToken, Task<ConnectivityState>>? _onTryConnect;
+*/
+        private readonly TaskCompletionSource<object?> _connectTcs;
         private readonly Func<CancellationToken, Task<ConnectivityState>>? _onTryConnect;
 
         public Subchannel Subchannel { get; }
 
-        public DnsEndPoint? CurrentEndPoint { get; private set; }
+        public BalancerAddress? CurrentAddress { get; private set; }
 
         public Task TryConnectTask => _connectTcs.Task;
 
@@ -50,26 +58,22 @@ namespace Grpc.Net.Client.Tests.Infrastructure.Balancer
         public void UpdateState(ConnectivityState state, Status? status = null)
         {
             _state = state;
-            Subchannel.UpdateConnectivityState(_state, status);
+            Subchannel.UpdateConnectivityState(_state, status ?? Status.DefaultSuccess);
         }
 
         public void Dispose()
         {
         }
 
-        public ValueTask<Stream> GetStreamAsync(DnsEndPoint endPoint, CancellationToken cancellationToken)
+        public ValueTask<Stream> GetStreamAsync(BalancerAddress address, CancellationToken cancellationToken)
         {
             return new ValueTask<Stream>(new MemoryStream());
         }
 
-        public void OnRequestComplete(CompletionContext context)
-        {
-        }
-
         public void Disconnect()
         {
-            CurrentEndPoint = null;
-            Subchannel.UpdateConnectivityState(ConnectivityState.Idle);
+            CurrentAddress = null;
+            Subchannel.UpdateConnectivityState(ConnectivityState.Idle, "Disconnected.");
         }
 
         public async
@@ -82,8 +86,8 @@ namespace Grpc.Net.Client.Tests.Infrastructure.Balancer
         {
             var newState = await (_onTryConnect?.Invoke(cancellationToken) ?? Task.FromResult(ConnectivityState.Ready));
 
-            CurrentEndPoint = Subchannel._addresses[0];
-            Subchannel.UpdateConnectivityState(newState);
+            CurrentAddress = Subchannel._addresses[0];
+            Subchannel.UpdateConnectivityState(newState, Status.DefaultSuccess);
 
             _connectTcs.TrySetResult(null);
 

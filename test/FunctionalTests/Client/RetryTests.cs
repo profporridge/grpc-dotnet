@@ -16,11 +16,8 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Globalization;
+using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
@@ -49,12 +46,15 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
                     if (bytes.Count >= nextFailure)
                     {
                         nextFailure = nextFailure * 2;
+                        Logger.LogInformation($"Server failing at {bytes.Count}. Next failure at {nextFailure}.");
                         throw new RpcException(new Status(StatusCode.Unavailable, ""));
                     }
 
+                    Logger.LogInformation($"Server received {bytes.Count}.");
                     bytes.Add(message.Data[0]);
                 }
 
+                Logger.LogInformation("Server returning response.");
                 return new DataMessage
                 {
                     Data = ByteString.CopyFrom(bytes.ToArray())
@@ -66,6 +66,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
                 return true;
             });
 
+            using var httpEventListener = new HttpEventSourceListener(LoggerFactory);
+
             // Arrange
             var method = Fixture.DynamicGrpc.AddClientStreamingMethod<DataMessage, DataMessage>(ClientStreamingWithReadFailures);
             var channel = CreateChannel(serviceConfig: ServiceConfigHelpers.CreateRetryServiceConfig(maxAttempts: 10), maxRetryAttempts: 10);
@@ -75,16 +77,19 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             // Act
             var call = client.ClientStreamingCall();
 
-            for (var i = 0; i < 20; i++)
+            for (var i = 0; i < 15; i++)
             {
                 sentData.Add((byte)i);
 
+                Logger.LogInformation($"Client writing message {i}.");
                 await call.RequestStream.WriteAsync(new DataMessage { Data = ByteString.CopyFrom(new byte[] { (byte)i }) }).DefaultTimeout();
                 await Task.Delay(1);
             }
 
+            Logger.LogInformation("Client completing request stream.");
             await call.RequestStream.CompleteAsync().DefaultTimeout();
 
+            Logger.LogInformation("Client waiting for response.");
             var result = await call.ResponseAsync.DefaultTimeout();
 
             // Assert
@@ -196,26 +201,25 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             Assert.IsFalse(Logs.Any(l => l.EventId.Name == "DeadlineTimerRescheduled"));
 
             AssertHasLog(LogLevel.Debug, "CallCommited", "Call commited. Reason: DeadlineExceeded");
-
-            tcs.SetResult(new DataMessage());
         }
 
         [Test]
         public async Task Unary_DeadlineExceedDuringBackoff_Failure()
         {
             var callCount = 0;
-            Task<DataMessage> UnaryFailure(DataMessage request, ServerCallContext context)
+            Task<DataMessage> UnaryFailureWithPushback(DataMessage request, ServerCallContext context)
             {
                 callCount++;
 
+                Logger.LogInformation($"Server sending pushback for call {callCount}.");
                 return Task.FromException<DataMessage>(new RpcException(new Status(StatusCode.Unavailable, ""), new Metadata
                 {
-                    new Metadata.Entry("grpc-retry-pushback-ms", TimeSpan.FromSeconds(10).TotalMilliseconds.ToString())
+                    new Metadata.Entry("grpc-retry-pushback-ms", TimeSpan.FromSeconds(10).TotalMilliseconds.ToString(CultureInfo.InvariantCulture))
                 }));
             }
 
             // Arrange
-            var method = Fixture.DynamicGrpc.AddUnaryMethod<DataMessage, DataMessage>(UnaryFailure);
+            var method = Fixture.DynamicGrpc.AddUnaryMethod<DataMessage, DataMessage>(UnaryFailureWithPushback, nameof(UnaryFailureWithPushback));
 
             var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig(
                 initialBackoff: TimeSpan.FromSeconds(10),
@@ -247,7 +251,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
 
                 return Task.FromException(new RpcException(new Status(StatusCode.Unavailable, ""), new Metadata
                 {
-                    new Metadata.Entry("grpc-retry-pushback-ms", TimeSpan.FromSeconds(10).TotalMilliseconds.ToString())
+                    new Metadata.Entry("grpc-retry-pushback-ms", TimeSpan.FromSeconds(10).TotalMilliseconds.ToString(CultureInfo.InvariantCulture))
                 }));
             }
 
@@ -347,6 +351,64 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             tcs.SetResult(new DataMessage());
         }
 
+        [Test]
+        public async Task ServerStreaming_CancellatonTokenSpecified_TokenUnregisteredAndResourcesReleased()
+        {
+            Task FakeServerStreamCall(DataMessage request, IServerStreamWriter<DataMessage> responseStream, ServerCallContext context)
+            {
+                return Task.CompletedTask;
+            }
+
+            // Arrange
+            var method = Fixture.DynamicGrpc.AddServerStreamingMethod<DataMessage, DataMessage>(FakeServerStreamCall);
+
+            var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig(retryableStatusCodes: new List<StatusCode> { StatusCode.DeadlineExceeded });
+            var channel = CreateChannel(serviceConfig: serviceConfig);
+
+            var references = new List<WeakReference>();
+
+            // Checking that token register calls don't build up on CTS and create a memory leak.
+            var cts = new CancellationTokenSource();
+
+            // Act
+            // Send calls in a different method so there is no chance that a stack reference
+            // to a gRPC call is still alive after calls are complete.
+            await MakeCallsAsync(channel, method, references, cts.Token).DefaultTimeout();
+
+            // Assert
+            // There is a race when cleaning up cancellation token registry.
+            // Retry a few times to ensure GC is run after unregister.
+            await TestHelpers.AssertIsTrueRetryAsync(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+
+                for (var i = 0; i < references.Count; i++)
+                {
+                    if (references[i].IsAlive)
+                    {
+                        return false;
+                    }
+                }
+
+                // Resources for past calls were successfully GCed.
+                return true;
+            }, "Assert that retry call resources are released.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static async Task MakeCallsAsync(GrpcChannel channel, Method<DataMessage, DataMessage> method, List<WeakReference> references, CancellationToken cancellationToken)
+        {
+            var client = TestClientFactory.Create(channel, method);
+            for (int i = 0; i < 10; i++)
+            {
+                var call = client.ServerStreamingCall(new DataMessage(), new CallOptions(cancellationToken: cancellationToken));
+                references.Add(new WeakReference(call.ResponseStream));
+
+                Assert.IsFalse(await call.ResponseStream.MoveNext());
+            }
+        }
+
         [TestCase(1)]
         [TestCase(20)]
         public async Task Unary_AttemptsGreaterThanDefaultClientLimit_LimitedAttemptsMade(int hedgingDelay)
@@ -357,6 +419,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
                 Interlocked.Increment(ref callCount);
                 return Task.FromException<DataMessage>(new RpcException(new Status(StatusCode.Unavailable, "")));
             }
+
+            using var httpEventListener = new HttpEventSourceListener(LoggerFactory);
 
             // Arrange
             var method = Fixture.DynamicGrpc.AddUnaryMethod<DataMessage, DataMessage>(UnaryFailure);

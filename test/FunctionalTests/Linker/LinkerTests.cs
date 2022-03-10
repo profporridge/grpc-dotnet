@@ -16,18 +16,14 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Linq;
+// Skip running load running tests in debug configuration
+#if !DEBUG
+
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Threading.Tasks;
 using Grpc.AspNetCore.FunctionalTests.Linker.Helpers;
 using Grpc.Tests.Shared;
 using NUnit.Framework;
-
-// Skip running load running tests in debug configuration
-#if !DEBUG
 
 namespace Grpc.AspNetCore.FunctionalTests.Linker
 {
@@ -87,7 +83,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Linker
             }
         }
 
-        private void EnsureDeleted(string path)
+        private static void EnsureDeleted(string path)
         {
             if (Directory.Exists(path))
             {
@@ -103,7 +99,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Linker
             var process = new DotNetProcess();
             try
             {
-                process.Start($"publish {resolvedPath} -r {GetRuntimeIdentifier()} -c Release -o {outputPath}");
+                process.Start($"publish {resolvedPath} -r {GetRuntimeIdentifier()} -c Release -o {outputPath} --self-contained");
                 await process.WaitForExitAsync().TimeoutAfter(Timeout);
             }
             catch (Exception ex)

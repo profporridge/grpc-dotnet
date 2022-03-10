@@ -16,9 +16,6 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Shared;
 using Log = Grpc.Net.Client.Internal.ClientStreamWriterBaseLog;
@@ -47,8 +44,15 @@ namespace Grpc.Net.Client.Internal
         {
             _call = call;
 
+            // CompleteTcs doesn't use RunContinuationsAsynchronously because we want the caller of CompleteAsync
+            // to wait until the TCS's awaiter, PushStreamContent, finishes completing the request.
+            // This is required to avoid a race condition between the HttpContent completing, and sending an
+            // END_STREAM flag to the server, and app code disposing the call, which will trigger a RST_STREAM
+            // if HttpContent has finished.
+            // See https://github.com/grpc/grpc-dotnet/issues/1394 for an example.
+            CompleteTcs = new TaskCompletionSource<bool>(TaskCreationOptions.None);
+
             WriteStreamTcs = new TaskCompletionSource<Stream>(TaskCreationOptions.RunContinuationsAsynchronously);
-            CompleteTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             WriteOptions = _call.Options.WriteOptions;
         }
 

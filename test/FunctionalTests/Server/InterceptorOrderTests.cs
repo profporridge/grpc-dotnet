@@ -16,9 +16,7 @@
 
 #endregion
 
-using System.IO;
 using System.IO.Pipelines;
-using System.Threading.Tasks;
 using FunctionalTestsWebsite.Infrastructure;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
@@ -145,8 +143,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
 
     class OrderedInterceptor : Interceptor
     {
-        public static readonly string OrderHeaderKey = "Order";
-        private int _expectedOrder;
+        public const string OrderHeaderKey = "Order";
+        private readonly int _expectedOrder;
 
         public OrderedInterceptor(int expectedOrder)
         {

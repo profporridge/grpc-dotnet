@@ -16,24 +16,15 @@
 
 #endregion
 
-using System;
-using System.IO;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Mime;
-using System.Threading.Tasks;
 using Any;
-using FunctionalTestsWebsite.Infrastructure;
-using FunctionalTestsWebsite.Services;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Greet;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
 using Grpc.Tests.Shared;
-using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using AnyMessage = Google.Protobuf.WellKnownTypes.Any;
@@ -152,9 +143,9 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
         {
             static async Task<HelloReply> ReturnHeadersTwice(HelloRequest request, ServerCallContext context)
             {
-                await context.WriteResponseHeadersAsync(null).DefaultTimeout();
+                await context.WriteResponseHeadersAsync(Metadata.Empty).DefaultTimeout();
 
-                await context.WriteResponseHeadersAsync(null).DefaultTimeout();
+                await context.WriteResponseHeadersAsync(Metadata.Empty).DefaultTimeout();
 
                 return new HelloReply { Message = "Should never reach here" };
             }

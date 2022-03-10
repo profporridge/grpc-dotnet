@@ -16,19 +16,13 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Threading;
-using System.Threading.Tasks;
 using Google.Protobuf;
 using Greet;
 using Grpc.Core;
-using Grpc.Net.Client.Configuration;
 using Grpc.Net.Compression;
+using System;
 
 namespace Grpc.Tests.Shared
 {
@@ -42,6 +36,11 @@ namespace Grpc.Tests.Shared
         public static Method<HelloRequest, HelloReply> GetServiceMethod(MethodType? methodType = null, Marshaller<HelloRequest>? requestMarshaller = null)
         {
             return new Method<HelloRequest, HelloReply>(methodType ?? MethodType.Unary, "ServiceName", "MethodName", requestMarshaller ?? HelloRequestMarshaller, HelloReplyMarshaller);
+        }
+
+        public static Method<TRequest, TResponse> GetServiceMethod<TRequest, TResponse>(MethodType methodType, Marshaller<TRequest> requestMarshaller, Marshaller<TResponse> responseMarshaller)
+        {
+            return new Method<TRequest, TResponse>(methodType, "ServiceName", "MethodName", requestMarshaller, responseMarshaller);
         }
 
         public static TestHttpMessageHandler CreateTestMessageHandler(HelloReply reply)
@@ -118,7 +117,11 @@ namespace Grpc.Tests.Shared
             }
 
             await ResponseUtils.WriteHeaderAsync(ms, data.Length, compress, CancellationToken.None);
+#if NET5_0_OR_GREATER
+            await ms.WriteAsync(data);
+#else
             await ms.WriteAsync(data, 0, data.Length);
+#endif
         }
 
         public static async Task<byte[]> GetResponseDataAsync<TResponse>(TResponse response) where TResponse : IMessage<TResponse>

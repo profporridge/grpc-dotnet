@@ -16,15 +16,9 @@
 
 #endregion
 
-using System;
-using System.Diagnostics.Tracing;
-using System.Text;
-using System.Threading.Tasks;
 using Authorize;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
-using Grpc.Gateway.Testing;
-using Grpc.Net.Client;
 using Grpc.Tests.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Net.Http.Headers;
@@ -53,57 +47,10 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Client
         {
         }
 
-        sealed class EventSourceListener : EventListener
-        {
-            private readonly string _eventSourceName;
-            private readonly StringBuilder _messageBuilder = new StringBuilder();
-
-            public EventSourceListener(string name)
-            {
-                _eventSourceName = name;
-            }
-
-            protected override void OnEventSourceCreated(EventSource eventSource)
-            {
-                base.OnEventSourceCreated(eventSource);
-
-                if (eventSource.Name.Contains("System.Net.Quic") ||
-                    eventSource.Name.Contains("System.Net.Http"))
-                {
-                    EnableEvents(eventSource, EventLevel.LogAlways, EventKeywords.All);
-                }
-            }
-
-            protected override void OnEventWritten(EventWrittenEventArgs eventData)
-            {
-                base.OnEventWritten(eventData);
-
-                string message;
-                lock (_messageBuilder)
-                {
-                    _messageBuilder.Append("<- Event ");
-                    _messageBuilder.Append(eventData.EventSource.Name);
-                    _messageBuilder.Append(" - ");
-                    _messageBuilder.Append(eventData.EventName);
-                    _messageBuilder.Append(" : ");
-                    _messageBuilder.AppendJoin(',', eventData.Payload!);
-                    _messageBuilder.Append(" ->");
-                    message = _messageBuilder.ToString();
-                    _messageBuilder.Clear();
-                }
-                Console.WriteLine(message);
-            }
-
-            public override string ToString()
-            {
-                return _messageBuilder.ToString();
-            }
-        }
-
         [Test]
         public async Task SendUnauthenticatedRequest_UnauthenticatedErrorResponse()
         {
-            using var httpEventListener = new EventSourceListener("Microsoft-System-Net-Http");
+            using var httpEventListener = new HttpEventSourceListener(LoggerFactory);
 
             SetExpectedErrorsFilter(writeContext =>
             {

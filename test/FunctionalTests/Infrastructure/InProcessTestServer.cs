@@ -16,16 +16,10 @@
 
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
+using System.Globalization;
 using System.Text;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -136,13 +130,15 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
             var builder = new StringBuilder();
             foreach (var log in logs)
             {
-                builder.AppendLine($"{log.Timestamp:O} {log.LoggerName} {log.LogLevel}: {log.Formatter(log.State, log.Exception)}");
+                var s = $"{log.Timestamp:O} {log.LoggerName} {log.LogLevel}: {log.Formatter(log.State, log.Exception)}";
+                builder.AppendLine(s);
                 if (log.Exception != null)
                 {
                     var message = log.Exception.ToString();
                     foreach (var line in message.Split(new[] { Environment.NewLine }, StringSplitOptions.None))
                     {
-                        builder.AppendLine($"| {line}");
+                        s = $"| {line}";
+                        builder.AppendLine(s);
                     }
                 }
             }
